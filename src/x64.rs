@@ -7,6 +7,19 @@ pub enum Operand {
     Imm(Imm),
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum RegLocInInstr {
+    Dst(RegLocInOp),
+    Src(RegLocInOp),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum RegLocInOp {
+    Reg,
+    MemBase,
+    MemIndex,
+}
+
 pub type Imm = u32;
 
 #[derive(Debug, Clone)]
@@ -42,7 +55,7 @@ pub enum OpCode {
 
 #[derive(Debug)]
 pub struct Block {
-    instrs: Vec<Instr>,
+    pub instrs: Vec<Instr>,
 }
 
 // `Zipper` to blocks[id].instrs[id].use_kind[ix]
@@ -52,7 +65,7 @@ pub struct RegContext {
     pub kind: UseKind,
     pub block_id: u32,
     pub instr_ix: u32,
-    pub operand_ix: u8,
+    pub operand_ix: RegLocInInstr,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
@@ -127,6 +140,13 @@ impl Reg {
         Reg::Mach(MachReg(ix))
     }
 
+    pub fn is_mach(&self) -> bool {
+        match self {
+            &Reg::Mach(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn new_virt(ix: u32) -> Self {
         Reg::Virtual(VirtualReg(ix))
     }
@@ -165,6 +185,14 @@ impl Instr {
         }
     }
 
+    fn dst_mut(&mut self) -> Option<&mut Operand> {
+        if self.opcode.has_dst() {
+            Some(&mut self.ops[0])
+        } else {
+            None
+        }
+    }
+
     fn src(&self) -> &Operand {
         let ix = if self.opcode.has_dst() {
             1
@@ -175,58 +203,95 @@ impl Instr {
         &self.ops[ix]
     }
 
-    pub fn outputs(&self) -> Option<Reg> {
+    fn src_mut(&mut self) -> &mut Operand {
+        let ix = if self.opcode.has_dst() {
+            1
+        } else {
+            0
+        };
+
+        &mut self.ops[ix]
+    }
+
+    pub fn set_reg_at(&mut self, ix: &RegLocInInstr, r: Reg) {
+        match ix {
+            &RegLocInInstr::Dst(ref dst) => self.dst_mut().unwrap().set_reg_at(dst, r),
+            &RegLocInInstr::Src(ref src) => self.src_mut().set_reg_at(src, r),
+        }
+    }
+
+    pub fn outputs(&self) -> Option<(RegLocInInstr, Reg)> {
         self.dst().and_then(|op| match op {
-            &Operand::Reg(r) => Some(r),
+            &Operand::Reg(r) => Some((RegLocInInstr::Dst(RegLocInOp::Reg), r)),
             _ => None,
         })
     }
 
-    pub fn inputs(&self) -> Vec<Reg> {
-        let mut rs = vec![];
+    pub fn inputs(&self) -> Vec<(RegLocInInstr, Reg)> {
+        let mut srcs = vec![];
         match self.src() {
-            &Operand::Reg(r) => { rs.push(r); }
-            &Operand::Mem(ref m) => { rs.extend(m.regs()); }
+            &Operand::Reg(r) => { srcs.push((RegLocInOp::Reg, r)); }
+            &Operand::Mem(ref m) => { srcs.extend(m.regs()); }
             _ => (),
         }
+        let mut dsts = vec![];
         match self.dst() {
             Some(&Operand::Reg(r)) => {
                 if self.opcode.reads_dst() {
-                    rs.push(r);
+                    dsts.push((RegLocInOp::Reg, r));
                 }
             }
-            Some(&Operand::Mem(ref m)) => { rs.extend(m.regs()); }
+            Some(&Operand::Mem(ref m)) => {
+                dsts.extend(m.regs())
+            }
             _ => (),
         }
-        rs
+        srcs.into_iter().map(|(loc, r)| (RegLocInInstr::Src(loc), r))
+            .chain(dsts.into_iter().map(|(loc, r)| (RegLocInInstr::Dst(loc), r)))
+            .collect()
+    }
+}
+
+impl Operand {
+    fn set_reg_at(&mut self, ix: &RegLocInOp, to_r: Reg) {
+        match (self, ix) {
+            (&mut Operand::Reg(ref mut r), &RegLocInOp::Reg) => *r = to_r,
+            (&mut Operand::Mem(ref mut m), &RegLocInOp::MemBase) => m.base = to_r,
+            (&mut Operand::Mem(ref mut m), &RegLocInOp::MemIndex) => {
+                *(m.index.as_mut().unwrap()) = to_r;
+            }
+            (thiz, _) => panic!("No such position {:?} on {:?}", ix, thiz),
+        }
     }
 }
 
 impl Mem {
-    pub fn regs(&self) -> Vec<Reg> {
-        let mut rs = vec![self.base];
-        rs.extend(self.index.iter());
+    pub fn regs(&self) -> Vec<(RegLocInOp, Reg)> {
+        let mut rs = vec![(RegLocInOp::MemBase, self.base)];
+        rs.extend(self.index.iter().map(|r| (RegLocInOp::MemIndex, *r)));
         rs
     }
 }
 
 impl RegContext {
     pub fn new(reg: Reg, kind: UseKind,
-               block_id: usize, instr_ix: usize, operand_ix: usize) -> Self {
+               block_id: usize, instr_ix: usize, operand_ix: RegLocInInstr) -> Self {
         RegContext {
             reg,
             kind,
             block_id: block_id as u32,
             instr_ix: instr_ix as u32,
-            operand_ix: operand_ix as u8,
+            operand_ix,
         }
     }
 
-    pub fn new_input(reg: Reg, block_id: usize, instr_ix: usize, operand_ix: usize) -> Self {
+    pub fn new_input(reg: Reg, block_id: usize,
+                     instr_ix: usize, operand_ix: RegLocInInstr) -> Self {
         RegContext::new(reg, UseKind::Input, block_id, instr_ix, operand_ix)
     }
 
-    pub fn new_output(reg: Reg, block_id: usize, instr_ix: usize, operand_ix: usize) -> Self {
+    pub fn new_output(reg: Reg, block_id: usize,
+                      instr_ix: usize, operand_ix: RegLocInInstr) -> Self {
         RegContext::new(reg, UseKind::Output, block_id, instr_ix, operand_ix)
     }
 
