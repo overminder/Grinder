@@ -45,6 +45,22 @@ pub struct Block {
     instrs: Vec<Instr>,
 }
 
+// `Zipper` to blocks[id].instrs[id].use_kind[ix]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RegContext {
+    pub reg: Reg,
+    pub kind: UseKind,
+    pub block_id: u32,
+    pub instr_ix: u32,
+    pub operand_ix: u8,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum UseKind {
+    Input,
+    Output,
+}
+
 // Impls
 
 impl fmt::Debug for VirtualReg {
@@ -191,5 +207,30 @@ impl Mem {
         let mut rs = vec![self.base];
         rs.extend(self.index.iter());
         rs
+    }
+}
+
+impl RegContext {
+    pub fn new(reg: Reg, kind: UseKind,
+               block_id: usize, instr_ix: usize, operand_ix: usize) -> Self {
+        RegContext {
+            reg,
+            kind,
+            block_id: block_id as u32,
+            instr_ix: instr_ix as u32,
+            operand_ix: operand_ix as u8,
+        }
+    }
+
+    pub fn new_input(reg: Reg, block_id: usize, instr_ix: usize, operand_ix: usize) -> Self {
+        RegContext::new(reg, UseKind::Input, block_id, instr_ix, operand_ix)
+    }
+
+    pub fn new_output(reg: Reg, block_id: usize, instr_ix: usize, operand_ix: usize) -> Self {
+        RegContext::new(reg, UseKind::Output, block_id, instr_ix, operand_ix)
+    }
+
+    pub fn as_input(&self) -> Self {
+        RegContext { kind: UseKind::Input, ..self.clone() }
     }
 }

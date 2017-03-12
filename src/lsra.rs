@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::cmp::Ordering;
-use std::{cmp, mem, fmt};
+use std::cmp::{self, Ordering};
 
 use ::x64::*;
+use ::utils;
 
 // Hints are attached here.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -13,23 +13,13 @@ struct LifetimePosition {
     local_offset: u8,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-enum UseKind {
-    Input,
-    Output,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct UseDescr {
-    reg: Reg,
-    kind: UseKind,
-}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct UsePosition {
     pos: LifetimePosition,
-    // | Actually this should be a pointer to the operand for this pos.
-    op: UseDescr,
+    // | In v8 this is a pointer to the operand for this pos. In Rust however
+    // we need to use indices rather than raw pointers.
+    ctx: RegContext,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -73,7 +63,7 @@ impl Ord for UsePosition {
     fn cmp(&self, other: &Self) -> Ordering {
         let r = self.pos.cmp(&other.pos);
         if r == Ordering::Equal {
-            self.op.reg.cmp(&other.op.reg)
+            self.ctx.reg.cmp(&other.ctx.reg)
         } else {
             r
         }
@@ -97,7 +87,7 @@ impl LifetimePosition {
         LifetimePosition::new(ix, INSTR_END)
     }
 
-    fn from_raw(ix: usize) -> Self {
+    fn from_computed(ix: usize) -> Self {
         LifetimePosition::new(ix >> 2, (ix & 3) as u8)
     }
 
@@ -109,8 +99,12 @@ impl LifetimePosition {
         LifetimePosition::new_instr_end(usize::max_value())
     }
 
-    fn ix(self) -> usize {
+    fn computed_ix(self) -> usize {
         (self.ix as usize) * STEP + (self.local_offset as usize)
+    }
+
+    fn instr_ix(self) -> usize {
+        self.ix as usize
     }
 
     fn is_instr_start(self) -> bool {
@@ -128,36 +122,27 @@ impl UseInterval {
     }
 
     fn first_intersection(&self, it: &UseInterval) -> Option<LifetimePosition> {
-        let mut lhs = self;
-        let mut rhs = it;
-        if lhs.start > rhs.start {
-            // Make sure lhs starts before rhs's start
-            mem::swap(&mut lhs, &mut rhs);
-        }
-        if lhs.end <= rhs.start {
-            // rhs starts after lhs's end: no intersection.
-            None
+        if it.start < self.start {
+            it.first_intersection(self)
+        } else if it.start < self.end {
+            Some(it.start)
         } else {
-            Some(rhs.start)
+            None
         }
     }
 }
 
 impl UsePosition {
-    fn new(pos: LifetimePosition, op: UseDescr) -> Self {
-        UsePosition { pos, op }
+    fn new(pos: LifetimePosition, ctx: RegContext) -> Self {
+        UsePosition { pos, ctx }
     }
 
-    fn new_input(pos: LifetimePosition, reg: Reg) -> Self {
-        UsePosition::new(pos, UseDescr { reg, kind: UseKind::Input })
-    }
-
-    fn new_output(pos: LifetimePosition, reg: Reg) -> Self {
-        UsePosition::new(pos, UseDescr { reg, kind: UseKind::Output })
+    fn reg(&self) -> Reg {
+        self.ctx.reg
     }
 
     fn is_input(&self) -> bool {
-        self.op.kind == UseKind::Input
+        self.ctx.kind == UseKind::Input
     }
 
     fn is_output(&self) -> bool {
@@ -240,29 +225,24 @@ impl LiveRange {
         self.poses.split_off(next_ix)
     }
 
-    fn split_at(&mut self, pos: LifetimePosition) -> Self {
-        debug_assert!(self.check_interior_sorted().is_ok());
-        // | Necessarily true?
-        debug_assert!(pos.is_instr_start());
-        // Find the pos before and after ix.
-
-        let splinter_poses = self.split_poses_at(pos);
-        let next_pos = splinter_poses[0].pos;
-        let prev_pos = self.last_pos().pos;
-
-        // For * - split - def, we don't need to do spill and reload.
-        let needs_spill_reload = !splinter_poses[0].is_output();
+    fn split_intervals(&mut self,
+                       before: LifetimePosition, after: LifetimePosition,
+                       needs_spill_reload: bool) -> Vec<UseInterval> {
 
         if needs_spill_reload {
+            // `after` must be an input. `before` and `after` must be in the same interval.
             panic!("No impl");
+
         } else {
+            // `after` must be an output. `before` and `after` must be in two
+            // different intervals.
             let next_ix = {
                 let mut prev_it = None;
                 let mut next_it = None;
                 for (it_ix, it) in self.intervals.iter().enumerate() {
-                    if it.end == prev_pos {
+                    if it.end == before {
                         prev_it = Some(it);
-                    } else if it.start == next_pos {
+                    } else if it.start == after {
                         debug_assert!(prev_it.is_some());
                         next_it = Some((it_ix, it));
                         break;
@@ -272,18 +252,35 @@ impl LiveRange {
                 let (next_ix, _) = next_it.unwrap();
                 next_ix
             };
-            let splinter_intervals = self.intervals.split_off(next_ix);
-            LiveRange {
-                intervals: splinter_intervals,
-                poses: splinter_poses,
-                assigned: None,
-            }
+            self.intervals.split_off(next_ix)
         }
     }
 
+    fn split_at(&mut self, pos: LifetimePosition) -> Self {
+        debug_assert!(self.check_interior_sorted().is_ok());
+        // | Necessarily true?
+        debug_assert!(pos.is_instr_start());
+        // Find the pos before and after ix.
+
+        let splinter_poses = self.split_poses_at(pos);
+        let before = self.last_pos().pos;
+        let after = splinter_poses[0].pos;
+
+        // For * - split - def, we don't need to do spill and reload.
+        let needs_spill_reload = !splinter_poses[0].is_output();
+        let splinter_intervals = self.split_intervals(before, after,
+                                                      needs_spill_reload);
+        LiveRange {
+            intervals: splinter_intervals,
+            poses: splinter_poses,
+            assigned: None,
+        }
+    }
+
+
     fn check_interior_sorted(&self) -> Result<(), String> {
-        ensure_sorted(&mut self.intervals.iter().map(|x| x.start))?;
-        ensure_sorted(&mut self.poses.iter())?;
+        utils::ensure_sorted(&mut self.intervals.iter().map(|x| x.start))?;
+        utils::ensure_sorted(&mut self.poses.iter())?;
         Ok(())
     }
 
@@ -310,7 +307,7 @@ impl LiveRange {
     }
 
     fn first_interval_start_ix(&self) -> usize {
-        self.first_interval().start.ix()
+        self.first_interval().start.computed_ix()
     }
 
     fn last_interval(&self) -> &UseInterval {
@@ -334,22 +331,10 @@ impl LiveRange {
     }
 
     fn reg(&self) -> Reg {
-        self.first_pos().op.reg
+        self.first_pos().reg()
     }
 }
 
-fn ensure_sorted<A: Ord + fmt::Debug>(it: &mut Iterator<Item=A>) -> Result<(), String> {
-    let mut last = None;
-    for a in it {
-        if let Some(last) = last {
-            if !(last <= a) {
-                return Err(format!("Failed to assert {:?} <= {:?}", last, a));
-            }
-        }
-        last = Some(a);
-    }
-    Ok(())
-}
 
 fn find_or_create_live_range(ranges: &mut LiveRangeVec, r: Reg) -> &mut LiveRange {
     let ix;
@@ -373,32 +358,38 @@ fn add_interval_and_poses_to_live_range(ranges: &mut LiveRangeVec, reg: Reg,
 }
 
 fn analyze_block_liveness(b: &Block) -> LiveRangeVec {
-    let mut live: HashMap<Reg, Vec<LifetimePosition>> = HashMap::new();
+    let mut live: HashMap<Reg, Vec<UsePosition>> = HashMap::new();
     let mut ranges = vec![];
+    // FIXME: use actual value.
+    let block_id = 0;
 
     // XXX: Hack to make sure that %rax is live at the end of the block.
     // let last_ix = LifetimePosition::new_instr_end(b.instrs().len() - 1);
     // live.insert(Reg::new_mach(0), vec![last_ix]);
 
-    for (ix, instr) in b.instrs().iter().enumerate().rev() {
+    for (instr_ix, instr) in b.instrs().iter().enumerate().rev() {
         // An instruction defines its dst at the end of the ix.
-        let pos_end = LifetimePosition::new_instr_end(ix);
-        for output in instr.outputs() {
+        let pos_end = LifetimePosition::new_instr_end(instr_ix);
+        for (operand_ix, output) in instr.outputs().into_iter().enumerate() {
+            let octx = RegContext::new_output(output, block_id, instr_ix, operand_ix);
             if let Some(pos_uses) = live.remove(&output) {
-                let interval = UseInterval::new(pos_end, *pos_uses.iter().last().unwrap());
-                let mut poses = vec![UsePosition::new_output(pos_end, output)];
-                for u in pos_uses {
-                    poses.push(UsePosition::new_input(u, output));
-                }
+                let interval = UseInterval::new(
+                    pos_end,
+                    pos_uses.iter().last().unwrap().pos);
+                let mut poses = vec![UsePosition::new(pos_end, octx)];
+                poses.extend(pos_uses.into_iter());
                 add_interval_and_poses_to_live_range(&mut ranges, output, interval, poses);
             } else {
                 // A def that is not used.
-                println!("[WARN] Unused output: {:?} @ {}", output, ix);
+                println!("[WARN] Unused output: {:?} @ {}", output, instr_ix);
             }
         }
         // An instruction uses its srcs at the start of the ix.
-        for input in instr.inputs() {
-            let mut pos_start = vec![LifetimePosition::new_instr_start(ix)];
+        for (operand_ix, input) in instr.inputs().into_iter().enumerate() {
+            let ictx = RegContext::new_input(input, block_id, instr_ix, operand_ix);
+            let mut pos_start = vec![
+                UsePosition::new(LifetimePosition::new_instr_start(instr_ix), ictx)
+            ];
             if let Some(pos_next_uses) = live.remove(&input) {
                 // Multiple uses before a def: add them all.
                 pos_start.extend(pos_next_uses);
@@ -417,6 +408,10 @@ fn analyze_block_liveness(b: &Block) -> LiveRangeVec {
     ranges
 }
 
+impl RegAllocData {
+
+}
+
 impl LinearScan {
     fn new(data: RegAllocData) -> Self {
         LinearScan {
@@ -427,8 +422,19 @@ impl LinearScan {
         }
     }
 
-    fn run(&mut self) {
+    fn add_unhandled(&mut self, range: LiveRange) {
+        let ix = self.data.liveness.len();
+        self.data.liveness.push(range);
+        self.unhandled_ranges.push(ix);
+        self.sort_unhandled();
+    }
+
+    fn sort_unhandled(&mut self) {
         sort_unhandled(&self.data.liveness, &mut self.unhandled_ranges);
+    }
+
+    fn run(&mut self) {
+        self.sort_unhandled();
 
         while let Some(current_range_ix) = self.unhandled_ranges.pop() {
             self.prepare_current_ix(current_range_ix);
@@ -456,27 +462,44 @@ impl LinearScan {
     fn process_current_ix(&mut self, current_ix: usize) {
         // XXX: Missing fixed reg handling.
         if let Some((mreg, largest_fit)) = self.largest_free_until_reg(current_ix) {
-            {
-                let ref mut current = self.data.liveness[current_ix];
-                if largest_fit >= current.last_interval().end {
-                    // Allocatable for the whole range.
-                    current.set_assigned_reg(mreg);
-                    self.active_ranges.push(current_ix);
-                    return;
-                }
-                let partially = largest_fit > current.first_interval().start;
-                debug_assert!(partially,
-                              "free_until_reg {:?} @ pos {:?} is smaller than current {:?}.",
-                              mreg, largest_fit, current);
+            if !self.try_allocate_free_reg(current_ix, mreg, largest_fit) {
+                // Must be partially allocatable.
+                self.allocate_partially_blocked_reg(current_ix, mreg, largest_fit);
             }
-
-            // Partially allocatable.
-            let splintee = self.data.liveness[current_ix].split_at(largest_fit);
-            self.data.liveness.push(splintee);
-
         } else {
             // All blocked. Spill from an active range.
+            panic!("AllocateBlockedReg");
         }
+    }
+
+    fn try_allocate_free_reg(&mut self,
+                             current_ix: usize, mreg: MachReg,
+                             free_until: LifetimePosition) -> bool {
+        let ref mut current = self.data.liveness[current_ix];
+        if current.last_interval().end <= free_until {
+            // Allocatable for the whole range.
+            current.set_assigned_reg(mreg);
+            self.active_ranges.push(current_ix);
+            true
+        } else {
+            let partially = current.first_interval().start < free_until;
+            debug_assert!(partially,
+                          "free_until_reg {:?} @ pos {:?} <= current {:?}.",
+                          mreg, free_until, current);
+            false
+        }
+    }
+
+    fn allocate_partially_blocked_reg(&mut self,
+                                      current_ix: usize, mreg: MachReg,
+                                      free_until: LifetimePosition) {
+        let splinter = {
+            let ref mut current = self.data.liveness[current_ix];
+            let r = current.split_at(free_until);
+            current.set_assigned_reg(mreg);
+            r
+        };
+        self.add_unhandled(splinter);
     }
 
     fn largest_free_until_reg(&self,
@@ -506,8 +529,8 @@ impl LinearScan {
         for (_, inactive_range) in self.inactive_ranges() {
             // Some of the inactive ranges might leave lifetime holes.
             if let Some(sect) = inactive_range.first_intersection(current) {
-                let assigned_ix = inactive_range.assigned_reg().ix();
-                free_until[assigned_ix] = cmp::min(free_until[assigned_ix], Some(sect));
+                let reg_ix = inactive_range.assigned_reg().ix();
+                free_until[reg_ix] = cmp::min(free_until[reg_ix], Some(sect));
             }
         }
 
@@ -569,26 +592,29 @@ mod test {
     }
 
     fn pos_start(ix: usize) -> usize {
-        LifetimePosition::new_instr_start(ix).ix()
+        LifetimePosition::new_instr_start(ix).computed_ix()
     }
 
     fn pos_end(ix: usize) -> usize {
-        LifetimePosition::new_instr_end(ix).ix()
+        LifetimePosition::new_instr_end(ix).computed_ix()
     }
 
-    fn live_range(r: Reg, intervals: &[usize], poses: &[(usize, UseKind)]) -> LiveRange {
+    fn live_range(r: Reg, intervals: &[usize],
+                  poses: &[(usize, usize, UseKind)]) -> LiveRange {
         let mut rg = LiveRange::new();
         for i in 0..(intervals.len() / 2) {
             let start = intervals[i * 2];
             let end = intervals[i * 2 + 1];
             rg.add_interval(UseInterval::new(
-                LifetimePosition::from_raw(start),
-                LifetimePosition::from_raw(end)));
+                LifetimePosition::from_computed(start),
+                LifetimePosition::from_computed(end)));
         }
-        for &(ix, kind) in poses {
+        for &(pos, operand_ix, kind) in poses {
+            let pos = LifetimePosition::from_computed(pos);
+            let instr_ix = pos.instr_ix();
             rg.add_pos(UsePosition::new(
-                LifetimePosition::from_raw(ix),
-                UseDescr { reg: r, kind }));
+                pos,
+                RegContext::new(r, kind, 0, instr_ix, operand_ix)));
         }
         rg
     }
@@ -611,27 +637,27 @@ mod test {
         let rg0 = live_range(vreg(0), &[
             pos_end(0), pos_start(3),
         ], &[
-            (pos_end(0), UseKind::Output),
-            (pos_start(2), UseKind::Input),
-            (pos_start(3), UseKind::Input),
+            (pos_end(0), 0, UseKind::Output),
+            (pos_start(2), 0, UseKind::Input),
+            (pos_start(3), 0, UseKind::Input),
         ]);
         let rg1 = live_range(vreg(1), &[
             pos_end(1), pos_start(2),
             pos_end(2), pos_start(3),
             pos_end(3), pos_start(4),
         ], &[
-            (pos_end(1), UseKind::Output),
-            (pos_start(2), UseKind::Input),
-            (pos_end(2), UseKind::Output),
-            (pos_start(3), UseKind::Input),
-            (pos_end(3), UseKind::Output),
-            (pos_start(4), UseKind::Input),
+            (pos_end(1), 0, UseKind::Output),
+            (pos_start(2), 1, UseKind::Input),
+            (pos_end(2), 0, UseKind::Output),
+            (pos_start(3), 1, UseKind::Input),
+            (pos_end(3), 0, UseKind::Output),
+            (pos_start(4), 0, UseKind::Input),
         ]);
         let rg2 = live_range(mreg(0), &[
             pos_end(4), pos_start(5)
         ], &[
-            (pos_end(4), UseKind::Output),
-            (pos_start(5), UseKind::Input),
+            (pos_end(4), 0, UseKind::Output),
+            (pos_start(5), 0, UseKind::Input),
         ]);
         let expected = vec![rg0, rg1, rg2];
         assert!(ls == expected, "{:#?} == {:#?}", ls, expected);
