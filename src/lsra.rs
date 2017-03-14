@@ -7,7 +7,7 @@ use ::x64::*;
 use ::utils;
 
 // Hints are attached here.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct LifetimePosition {
     ix: u32,
     local_offset: u8,
@@ -35,6 +35,8 @@ struct LiveRange {
     assigned: Option<MachReg>,
     split_to: Option<usize>,
     is_splinter: bool,
+    spill_at_end: bool,
+    reload_at_start: bool,
 }
 
 struct LinearScan {
@@ -51,6 +53,16 @@ struct RegAllocData {
 }
 
 struct CommitRegAssignmentPhase {
+    data: RegAllocData,
+}
+
+struct SpillSlotAllocator {
+    next_slot: usize,
+    spill_slots: HashMap<u32, usize>,
+}
+
+struct CommitSpillingPhase {
+    alloc: SpillSlotAllocator,
     data: RegAllocData,
 }
 
@@ -78,31 +90,41 @@ impl Ord for UsePosition {
 
 impl LifetimePosition {
     fn new_gap_start(ix: usize) -> Self {
-        LifetimePosition::new(ix, GAP_START)
+        Self::new(ix, GAP_START)
     }
 
     fn new_gap_end(ix: usize) -> Self {
-        LifetimePosition::new(ix, GAP_END)
+        Self::new(ix, GAP_END)
     }
 
     fn new_instr_start(ix: usize) -> Self {
-        LifetimePosition::new(ix, INSTR_START)
+        Self::new(ix, INSTR_START)
     }
 
     fn new_instr_end(ix: usize) -> Self {
-        LifetimePosition::new(ix, INSTR_END)
+        Self::new(ix, INSTR_END)
     }
 
     fn from_computed(ix: usize) -> Self {
-        LifetimePosition::new(ix >> 2, (ix & 3) as u8)
+        Self::new(ix >> 2, (ix & 3) as u8)
     }
 
     fn new(ix: usize, local_offset: u8) -> Self {
-        LifetimePosition { ix: ix as u32, local_offset }
+        Self { ix: ix as u32, local_offset }
     }
 
     fn max() -> Self {
-        LifetimePosition::new_instr_end(usize::max_value())
+        Self::new_instr_end(usize::max_value())
+    }
+
+    fn gap_after(self) -> Self {
+        debug_assert!(self.is_instr());
+        Self::new_gap_start(self.ix as usize + 1)
+    }
+
+    fn gap_before(self) -> Self {
+        debug_assert!(self.is_instr());
+        Self::new_gap_end(self.ix as usize)
     }
 
     fn computed_ix(self) -> usize {
@@ -116,15 +138,31 @@ impl LifetimePosition {
     fn is_instr_start(self) -> bool {
         self.local_offset == INSTR_START
     }
+
+    fn is_gap(self) -> bool {
+        self.local_offset == GAP_START || self.local_offset == GAP_END
+    }
+
+    fn is_instr(self) -> bool {
+        self.local_offset == INSTR_START || self.local_offset == INSTR_END
+    }
 }
 
 impl UseInterval {
     fn new(start: LifetimePosition, end: LifetimePosition) -> Self {
-        UseInterval { start, end }
+        Self { start, end }
     }
 
     fn contains_pos(&self, pos: LifetimePosition) -> bool {
         self.start <= pos && pos < self.end
+    }
+
+    fn split_at(&mut self, before: LifetimePosition, after: LifetimePosition) -> Self {
+        debug_assert!(self.contains_pos(before));
+        debug_assert!(self.contains_pos(after));
+        let r = Self::new(after, self.end);
+        self.end = before;
+        r
     }
 
     fn first_intersection(&self, it: &UseInterval) -> Option<LifetimePosition> {
@@ -140,7 +178,7 @@ impl UseInterval {
 
 impl UsePosition {
     fn new(pos: LifetimePosition, ctx: RegContext) -> Self {
-        UsePosition { pos, ctx }
+        Self { pos, ctx }
     }
 
     fn reg(&self) -> Reg {
@@ -167,12 +205,14 @@ const INSTR_END: u8 = 3;
 
 impl LiveRange {
     fn new() -> Self {
-        LiveRange {
+        Self {
             intervals: vec![],
             poses: vec![],
             assigned: None,
             split_to: None,
             is_splinter: false,
+            spill_at_end: false,
+            reload_at_start: false,
         }
     }
 
@@ -208,7 +248,7 @@ impl LiveRange {
             let mut next = None;
             for (u_ix, u) in self.poses.iter().enumerate() {
                 if u.is_input() {
-                    // ix is an output position so it can never have the same position
+                    // pos is an output position so it can never have the same position
                     // as another input position.
                     debug_assert!(u.pos != pos);
                 }
@@ -236,30 +276,21 @@ impl LiveRange {
     fn split_intervals(&mut self,
                        before: LifetimePosition, after: LifetimePosition,
                        needs_spill_reload: bool) -> Vec<UseInterval> {
-
+        let before_ix = self.intervals.iter()
+            .position(|it| it.contains_pos(before))
+            .unwrap();
+        let next_ix = before_ix + 1;
         if needs_spill_reload {
+            debug_assert!(self.intervals[before_ix].contains_pos(after));
             // `after` must be an input. `before` and `after` must be in the same interval.
-            panic!("No impl");
-
+            let splinter = self.intervals[before_ix].split_at(before, after);
+            let mut splinters = self.intervals.split_off(next_ix);
+            splinters.insert(0, splinter);
+            splinters
         } else {
             // `after` must be an output. `before` and `after` must be in two
-            // different intervals.
-            let next_ix = {
-                let mut prev_it = None;
-                let mut next_it = None;
-                for (it_ix, it) in self.intervals.iter().enumerate() {
-                    if it.end == before {
-                        prev_it = Some(it);
-                    } else if it.start == after {
-                        debug_assert!(prev_it.is_some());
-                        next_it = Some((it_ix, it));
-                        break;
-                    }
-                }
-                prev_it.unwrap();
-                let (next_ix, _) = next_it.unwrap();
-                next_ix
-            };
+            // consecutive intervals.
+            debug_assert!(self.intervals[next_ix].contains_pos(after));
             self.intervals.split_off(next_ix)
         }
     }
@@ -267,24 +298,31 @@ impl LiveRange {
     fn split_at(&mut self, pos: LifetimePosition, fresh_range_ix: usize) -> Self {
         self.debug_check_interior_sorted();
         // | Necessarily true?
-        debug_assert!(pos.is_instr_start());
+        // debug_assert!(pos.is_instr_start());
         // Find the pos before and after ix.
 
         let splinter_poses = self.split_poses_at(pos);
-        let before = self.last_pos().pos;
-        let after = splinter_poses[0].pos;
+        // NOTE: We can use self.last_pos().pos.gap_after() (eager spill)
+        // or just pos (lazy spill).
+        // Or we just attach the spill/restore info to instrs?
+        let before = self.last_pos().pos.gap_after();
+        // Reload on gap_before make sure the reload happens before the use.
+        let after = splinter_poses[0].pos.gap_before();
 
         // For * - split - def, we don't need to do spill and reload.
         let needs_spill_reload = !splinter_poses[0].is_output();
         let splinter_intervals = self.split_intervals(before, after,
                                                       needs_spill_reload);
         self.split_to = Some(fresh_range_ix);
-        LiveRange {
+        self.spill_at_end = needs_spill_reload;
+        Self {
             intervals: splinter_intervals,
             poses: splinter_poses,
             assigned: None,
             is_splinter: true,
             split_to: None,
+            spill_at_end: false,
+            reload_at_start: needs_spill_reload,
         }
     }
 
@@ -320,18 +358,11 @@ impl LiveRange {
         &self.poses[0]
     }
 
-    fn first_interval_start_ix(&self) -> usize {
-        self.first_interval().start.computed_ix()
-    }
-
     fn first_use_after(&self, before: LifetimePosition) -> Option<LifetimePosition> {
         self.debug_check_interior_sorted();
-        for p in &self.poses {
-            if before < p.pos {
-                return Some(p.pos);
-            }
-        }
-        None
+        self.poses.iter()
+            .map(|p| p.pos)
+            .find(|p| &before < p)
     }
 
     fn last_interval(&self) -> &UseInterval {
@@ -434,7 +465,7 @@ fn analyze_block_liveness(b: &Block) -> LiveRangeVec {
 
 impl RegAllocData {
     fn new(block: Block, liveness: LiveRangeVec, num_regs_available: usize) -> Self {
-        RegAllocData {
+        Self {
             block,
             liveness,
             num_regs_available,
@@ -444,7 +475,7 @@ impl RegAllocData {
 
 impl LinearScan {
     fn new(data: RegAllocData) -> Self {
-        LinearScan {
+        Self {
             unhandled_ranges: (0..data.liveness.len()).collect(),
             active_ranges: vec![],
             inactive_ranges: vec![],
@@ -495,11 +526,12 @@ impl LinearScan {
         if let Some((mreg, pos)) = self.farthest_free_until_reg(current_ix) {
             if !self.try_allocate_free_reg(current_ix, mreg, pos) {
                 // Must be partially allocatable.
-                self.allocate_partially_blocked_reg(current_ix, mreg, pos);
+                // XXX: also call pos.gap_before()?
+                self.allocate_partially_free_reg(current_ix, mreg, pos);
             }
         } else {
             // All blocked. Spill from an active range.
-            self.try_allocate_blocked_reg(current_ix);
+            self.allocate_blocked_reg(current_ix);
         }
     }
 
@@ -521,7 +553,7 @@ impl LinearScan {
         }
     }
 
-    fn allocate_partially_blocked_reg(&mut self,
+    fn allocate_partially_free_reg(&mut self,
                                       current_ix: usize, mreg: MachReg,
                                       free_until: LifetimePosition) {
         self.split_and_assign_reg(current_ix, free_until, mreg, None);
@@ -544,7 +576,7 @@ impl LinearScan {
     }
 
 
-    fn try_allocate_blocked_reg(&mut self, current_ix: usize) {
+    fn allocate_blocked_reg(&mut self, current_ix: usize) {
         let (mreg, (range_ix, pos)) = self.farthest_next_reg_use(current_ix);
         let (first_pos, last_pos) = {
             let ref current = self.data.liveness[current_ix];
@@ -556,7 +588,10 @@ impl LinearScan {
             panic!("No impl: only possible on multiple blocks");
         } else if pos < last_pos {
             // Partially free, split the other range.
-            self.split_and_assign_reg(range_ix, pos, mreg, Some(current_ix));
+            // first_pos is usually a def so it's in the INSTR_END pos
+            // and we need to split before that.
+            self.split_and_assign_reg(range_ix, first_pos.gap_before(),
+                                      mreg, Some(current_ix));
             self.active_ranges.push(current_ix);
         } else {
             // Reg is entirely free.
@@ -572,8 +607,8 @@ impl LinearScan {
             .iter()
             // | Add reg_ix
             .enumerate()
-            // | Find largest
-            .max_by_key(|&(_, p)| p)
+            // | Find farthest range, preferring smaller reg_ix
+            .max_by_key(|&(reg_ix, p)| (p, -(reg_ix as isize)))
             .iter()
             // | Join nested options
             .flat_map(|&(ix, mb_p)| mb_p.map(|p| (MachReg::new(ix), p)))
@@ -584,8 +619,9 @@ impl LinearScan {
                              current_ix: usize) -> (MachReg, (usize, LifetimePosition)) {
         self.find_next_reg_uses(current_ix)
             .into_iter().enumerate()
+            // | Find farthest range, preferring smaller reg_ix
+            .max_by_key(|&(reg_ix, (_, p))| (p, -(reg_ix as isize)))
             .map(|(reg_ix, p)| (MachReg::new(reg_ix), p))
-            .max_by_key(|&(_, (_, p))| p)
             .unwrap()
     }
 
@@ -618,8 +654,11 @@ impl LinearScan {
             // TODO: Respect fixed / non-spillable ranges.
             let reg_ix = active_range.assigned_reg().ix();
             // V8 might spill an active range earlier if its next reg use is not beneficial.
-            let u = active_range.first_use_after(current.first_pos().pos).unwrap();
-            utils::inplace_min_by(&mut next_use[reg_ix], (range_ix, u), |x, y| x.1 < y.1);
+            if let Some(u) = active_range.first_use_after(current.first_pos().pos) {
+                // FIXME: There might not exist a use after current in active_range,
+                // if the later is a split parent... Or not?
+                utils::inplace_min_by(&mut next_use[reg_ix], (range_ix, u), |x, y| x.1 < y.1);
+            }
         }
 
         for (range_ix, inactive_range) in self.inactive_ranges() {
@@ -668,7 +707,7 @@ fn shuffle_active_inactive(start: LifetimePosition, from_should_contain: bool,
 
 impl CommitRegAssignmentPhase {
     fn new(data: RegAllocData) -> Self {
-        CommitRegAssignmentPhase { data }
+        Self { data }
     }
 
     fn run(&mut self) {
@@ -687,9 +726,76 @@ impl CommitRegAssignmentPhase {
     }
 }
 
+impl SpillSlotAllocator {
+    fn new() -> Self {
+        Self {
+            spill_slots: HashMap::new(),
+            next_slot: 1,
+        }
+    }
+
+    fn slot_for(&mut self, reg: &Reg) -> Operand {
+        let next_slot = &mut self.next_slot;
+        let ix = self.spill_slots.entry(reg.virt_ix()).or_insert_with(|| {
+            let ix = *next_slot;
+            *next_slot += 1;
+            ix
+        });
+        Mem {
+            base: Reg::rsp(),
+            index: None,
+            disp: (*ix << 3) as u32,
+        }.into_op()
+    }
+}
+
+impl CommitSpillingPhase {
+    fn new(data: RegAllocData) -> Self {
+        Self {
+            alloc: SpillSlotAllocator::new(),
+            data,
+        }
+    }
+
+
+    fn run(&mut self) {
+        let mut spill_instrs = HashMap::new();
+        for range in &self.data.liveness {
+            let vr = range.reg();
+            let mr = range.assigned_reg().into_reg();
+            if range.reload_at_start {
+                let slot = self.alloc.slot_for(&vr);
+                // The exact pos might need to be recorded by the regalloc.
+                spill_instrs.insert(range.first_pos().pos.gap_before(),
+                                    Instr::mov(mr.into_op(), slot));
+            }
+            if range.spill_at_end {
+                let slot = self.alloc.slot_for(&vr);
+                spill_instrs.insert(range.last_pos().pos,
+                                    Instr::mov(slot, mr.into_op()));
+            }
+        }
+
+        // Merge.
+        let ordinary_instrs: Vec<_> = self.data.block.instrs.drain(..).collect();
+        let mut rs = vec![];
+        for i in 0..ordinary_instrs.len() * STEP {
+            let pos = LifetimePosition::from_computed(i);
+            if pos.is_instr_start() {
+                rs.push(ordinary_instrs[pos.instr_ix()].clone());
+            }
+            for i in spill_instrs.remove(&pos) {
+                rs.push(i);
+            }
+        }
+        self.data.block.instrs = rs;
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use ::test_utils;
 
     fn vreg(ix: u32) -> Reg {
         Reg::new_virt(ix)
@@ -743,7 +849,7 @@ mod test {
         rg
     }
 
-    fn simple_block() -> Block {
+    fn simple_block_nospill() -> Block {
         let v0 = op_vreg(0);
         let v1 = op_vreg(1);
         let m0 = op_mreg(0);
@@ -758,9 +864,32 @@ mod test {
         Block::new(instrs)
     }
 
+    fn simple_block_spill() -> Block {
+        let v0 = op_vreg(0);
+        let v1 = op_vreg(1);
+        let v2 = op_vreg(2);
+        let v3 = op_vreg(3);
+        let v4 = op_vreg(4);
+        let m0 = op_mreg(0);
+        let instrs = vec![
+            Instr::mov(v0.clone(), Operand::Imm(0)),
+            Instr::mov(v1.clone(), Operand::Imm(1)),
+            Instr::mov(v2.clone(), Operand::Imm(2)),
+            Instr::mov(v3.clone(), Operand::Imm(3)),
+            // Instr::mov(v4.clone(), Operand::Imm(4)),
+            Instr::add(v0.clone(), v1.clone()),
+            Instr::add(v0.clone(), v2.clone()),
+            Instr::add(v0.clone(), v3.clone()),
+            // Instr::add(v0.clone(), v4.clone()),
+            // Instr::mov(m0.clone(), v0.clone()),
+            Instr::ret(v0.clone()),
+        ];
+        Block::new(instrs)
+    }
+
     #[test]
     fn can_analyze_live_ranges_for_single_block() {
-        let b = simple_block();
+        let b = simple_block_nospill();
         let ls = analyze_block_liveness(&b);
         let rg0 = live_range(vreg(0), &[
             pos_end(0), pos_start(3),
@@ -788,17 +917,57 @@ mod test {
             (pos_start(5), src_reg(), UseKind::Input),
         ]);
         let expected = vec![rg0, rg1, rg2];
-        assert!(ls == expected, "{:#?} == {:#?}", ls, expected);
+        test_utils::assert_eq_pretty("analyze-liveness-1block", &ls, &expected);
     }
 
     #[test]
-    fn can_lsra_for_single_block() {
-        let block = simple_block();
+    fn can_lsra_for_single_block_nospill() {
+        let block = simple_block_nospill();
         let liveness = analyze_block_liveness(&block);
         let mut lsra = LinearScan::new(RegAllocData::new(block, liveness, 4));
         lsra.run();
         let mut assignment = CommitRegAssignmentPhase::new(lsra.data);
         assignment.run();
+
+        let m0 = op_mreg(0);
+        let m1 = op_mreg(1);
+        let expected_instrs = vec![
+            Instr::mov(m0.clone(), Operand::Imm(42)),
+            Instr::mov(m1.clone(), Operand::Imm(0)),
+            Instr::add(m1.clone(), m0.clone()),
+            Instr::add(m1.clone(), m0.clone()),
+            Instr::mov(m0.clone(), m1.clone()),
+            Instr::ret(m0.clone()),
+        ];
+
+        test_utils::assert_eq_pretty("lsra-instr-1block-nospill",
+                                     &assignment.data.block.instrs, &expected_instrs);
+    }
+
+    #[test]
+    fn can_lsra_for_single_block_spill() {
+        let block = simple_block_spill();
+        let liveness = analyze_block_liveness(&block);
+        let mut lsra = LinearScan::new(RegAllocData::new(block, liveness, 2));
+        lsra.run();
+        let mut rass = CommitRegAssignmentPhase::new(lsra.data);
+        rass.run();
+        let mut spill = CommitSpillingPhase::new(rass.data);
+        spill.run();
+
+        let m0 = op_mreg(0);
+        let m1 = op_mreg(1);
+        let expected_instrs = vec![
+            Instr::mov(m0.clone(), Operand::Imm(42)),
+            Instr::mov(m1.clone(), Operand::Imm(0)),
+            Instr::add(m1.clone(), m0.clone()),
+            Instr::add(m1.clone(), m0.clone()),
+            Instr::mov(m0.clone(), m1.clone()),
+            Instr::ret(m0.clone()),
+        ];
+
+        test_utils::assert_eq_pretty("lsra-instr-1block-spill",
+                                     &spill.data.block.instrs, &expected_instrs);
     }
 }
 

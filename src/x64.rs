@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Operand {
     Reg(Reg),
     Mem(Mem),
@@ -22,7 +22,7 @@ pub enum RegLocInOp {
 
 pub type Imm = u32;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Mem {
     pub base: Reg,
     pub index: Option<Reg>,
@@ -40,10 +40,23 @@ pub struct VirtualReg(pub u32);
 #[derive(Hash, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct MachReg(pub u32);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Instr {
     pub opcode: OpCode,
     pub ops: Vec<Operand>,
+    pub parallel_moves: ParallelMoves,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ParallelMoves {
+    start: Vec<ParallelMove>,
+    end: Vec<ParallelMove>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ParallelMove {
+    dst: Operand,
+    src: Operand,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -130,6 +143,10 @@ impl MachReg {
         MachReg(ix as u32)
     }
 
+    pub fn into_reg(self) -> Reg {
+        Reg::Mach(self)
+    }
+
     pub fn ix(self) -> usize {
         self.0 as usize
     }
@@ -147,34 +164,57 @@ impl Reg {
         }
     }
 
+    pub fn mach_ix(&self) -> usize {
+        match self {
+            &Reg::Mach(m) => m.ix(),
+            _ => panic!("{:?} is not a MachReg", self),
+        }
+    }
+
+    pub fn virt_ix(&self) -> u32 {
+        match self {
+            &Reg::Virtual(v) => v.0,
+            _ => panic!("{:?} is not a VirtualReg", self),
+        }
+    }
+
+    pub fn rsp() -> Self {
+        // FIXME
+        Reg::new_mach(100)
+    }
+
     pub fn new_virt(ix: u32) -> Self {
         Reg::Virtual(VirtualReg(ix))
+    }
+
+    pub fn into_op(self) -> Operand {
+        Operand::Reg(self)
     }
 }
 
 impl Instr {
     pub fn new(opcode: OpCode, ops: Vec<Operand>) -> Self {
-        Instr { opcode, ops }
+        Self { opcode, ops, parallel_moves: ParallelMoves::new() }
     }
 
     pub fn new2(opcode: OpCode, dst: Operand, src: Operand) -> Self {
-        Instr::new(opcode, vec![dst, src])
+        Self::new(opcode, vec![dst, src])
     }
 
     pub fn new1(opcode: OpCode, op: Operand) -> Self {
-        Instr::new(opcode, vec![op])
+        Self::new(opcode, vec![op])
     }
 
     pub fn add(dst: Operand, src: Operand) -> Self {
-        Instr::new2(OpCode::Add, dst, src)
+        Self::new2(OpCode::Add, dst, src)
     }
 
     pub fn mov(dst: Operand, src: Operand) -> Self {
-        Instr::new2(OpCode::Mov, dst, src)
+        Self::new2(OpCode::Mov, dst, src)
     }
 
     pub fn ret(op: Operand) -> Self {
-        Instr::new1(OpCode::Ret, op)
+        Self::new1(OpCode::Ret, op)
     }
 
     fn dst(&self) -> Option<&Operand> {
@@ -252,6 +292,29 @@ impl Instr {
     }
 }
 
+impl ParallelMoves {
+    fn new() -> Self {
+        Self {
+            start: vec![],
+            end: vec![],
+        }
+    }
+
+    pub fn add_to_start(&mut self, mov: ParallelMove) {
+        self.start.push(mov);
+    }
+
+    pub fn add_to_end(&mut self, mov: ParallelMove) {
+        self.end.push(mov);
+    }
+}
+
+impl ParallelMove {
+    pub fn new(dst: Operand, src: Operand) -> Self {
+        Self { dst, src }
+    }
+}
+
 impl Operand {
     fn set_reg_at(&mut self, ix: &RegLocInOp, to_r: Reg) {
         match (self, ix) {
@@ -270,6 +333,10 @@ impl Mem {
         let mut rs = vec![(RegLocInOp::MemBase, self.base)];
         rs.extend(self.index.iter().map(|r| (RegLocInOp::MemIndex, *r)));
         rs
+    }
+
+    pub fn into_op(self) -> Operand {
+        Operand::Mem(self)
     }
 }
 
