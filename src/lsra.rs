@@ -35,8 +35,8 @@ struct LiveRange {
     assigned: Option<MachReg>,
     split_to: Option<usize>,
     is_splinter: bool,
-    spill_at_end: bool,
-    reload_at_start: bool,
+    spill_at: Option<LifetimePosition>,
+    reload_at: Option<LifetimePosition>,
 }
 
 struct LinearScan {
@@ -139,6 +139,14 @@ impl LifetimePosition {
         self.local_offset == INSTR_START
     }
 
+    fn is_gap_start(self) -> bool {
+        self.local_offset == GAP_START
+    }
+
+    fn is_gap_end(self) -> bool {
+        self.local_offset == GAP_END
+    }
+
     fn is_gap(self) -> bool {
         self.local_offset == GAP_START || self.local_offset == GAP_END
     }
@@ -157,9 +165,13 @@ impl UseInterval {
         self.start <= pos && pos < self.end
     }
 
+    fn contains_pos_inclusive(&self, pos: LifetimePosition) -> bool {
+        self.start <= pos && pos <= self.end
+    }
+
     fn split_at(&mut self, before: LifetimePosition, after: LifetimePosition) -> Self {
         debug_assert!(self.contains_pos(before));
-        debug_assert!(self.contains_pos(after));
+        debug_assert!(self.contains_pos_inclusive(after));
         let r = Self::new(after, self.end);
         self.end = before;
         r
@@ -211,8 +223,8 @@ impl LiveRange {
             assigned: None,
             split_to: None,
             is_splinter: false,
-            spill_at_end: false,
-            reload_at_start: false,
+            spill_at: None,
+            reload_at: None,
         }
     }
 
@@ -242,47 +254,34 @@ impl LiveRange {
         self.poses.push(pos);
     }
 
-    fn split_poses_at(&mut self, pos: LifetimePosition) -> Vec<UsePosition> {
-        let next_ix = {
-            let mut prev = None;
-            let mut next = None;
-            for (u_ix, u) in self.poses.iter().enumerate() {
+    fn split_poses_at(&mut self, splinter_start: LifetimePosition) -> Vec<UsePosition> {
+        let next_ix = self.poses.iter()
+            .position(|u| {
                 if u.is_input() {
                     // pos is an output position so it can never have the same position
                     // as another input position.
-                    debug_assert!(u.pos != pos);
+                    debug_assert!(u.pos != splinter_start);
                 }
-                if u.pos <= pos {
-                    prev = Some(u);
-                } else {
-                    // Found first pos after pos.
-                    if let Some(prev) = prev {
-                        // So the previous pos must be before or equals to ix.
-                        debug_assert!(prev.pos <= pos);
-                    }
-                    next = Some((u_ix, u));
-                    break;
-                }
-            }
-
-            prev.unwrap();
-            let (next_ix, _) = next.unwrap().clone();
-            next_ix
-        };
-
+                u.pos >= splinter_start
+            })
+            .unwrap();
+        debug_assert!(self.poses[next_ix - 1].pos < splinter_start);
         self.poses.split_off(next_ix)
     }
 
+    // before must be included in self.intervals after the split,
+    // after must be included in splinters after the split.
     fn split_intervals(&mut self,
                        before: LifetimePosition, after: LifetimePosition,
                        needs_spill_reload: bool) -> Vec<UseInterval> {
         let before_ix = self.intervals.iter()
-            .position(|it| it.contains_pos(before))
+            .position(|it| it.contains_pos_inclusive(before))
             .unwrap();
         let next_ix = before_ix + 1;
         if needs_spill_reload {
-            debug_assert!(self.intervals[before_ix].contains_pos(after));
             // `after` must be an input. `before` and `after` must be in the same interval.
+            debug_assert!(self.intervals[before_ix].end != before);
+            debug_assert!(self.intervals[before_ix].contains_pos_inclusive(after));
             let splinter = self.intervals[before_ix].split_at(before, after);
             let mut splinters = self.intervals.split_off(next_ix);
             splinters.insert(0, splinter);
@@ -290,40 +289,41 @@ impl LiveRange {
         } else {
             // `after` must be an output. `before` and `after` must be in two
             // consecutive intervals.
-            debug_assert!(self.intervals[next_ix].contains_pos(after));
+            debug_assert!(self.intervals[before_ix].end == before);
+            debug_assert!(self.intervals[next_ix].start == after);
             self.intervals.split_off(next_ix)
         }
     }
 
-    fn split_at(&mut self, pos: LifetimePosition, fresh_range_ix: usize) -> Self {
+    fn split_at(&mut self, splinter_start: LifetimePosition, fresh_range_ix: usize) -> Self {
         self.debug_check_interior_sorted();
         // | Necessarily true?
         // debug_assert!(pos.is_instr_start());
         // Find the pos before and after ix.
 
-        let splinter_poses = self.split_poses_at(pos);
-        // NOTE: We can use self.last_pos().pos.gap_after() (eager spill)
-        // or just pos (lazy spill).
-        // Or we just attach the spill/restore info to instrs?
-        let before = self.last_pos().pos.gap_after();
-        // Reload on gap_before make sure the reload happens before the use.
-        let after = splinter_poses[0].pos.gap_before();
+        let splinter_poses = self.split_poses_at(splinter_start);
+        // Eager spill, right after the last use before pos.
+        let before = self.last_pos().pos;
+        // Lazy reload, just before the first use after pos.
+        let after = splinter_poses[0].pos;
 
         // For * - split - def, we don't need to do spill and reload.
         let needs_spill_reload = !splinter_poses[0].is_output();
         let splinter_intervals = self.split_intervals(before, after,
                                                       needs_spill_reload);
         self.split_to = Some(fresh_range_ix);
-        self.spill_at_end = needs_spill_reload;
-        Self {
+        self.spill_at = utils::some_if(needs_spill_reload, || before.gap_after());
+        let res = Self {
             intervals: splinter_intervals,
             poses: splinter_poses,
             assigned: None,
             is_splinter: true,
             split_to: None,
-            spill_at_end: false,
-            reload_at_start: needs_spill_reload,
-        }
+            spill_at: None,
+            reload_at: utils::some_if(needs_spill_reload, || after.gap_before()),
+        };
+        println!("split({:#?}) -> {:#?} + {:#?}", splinter_start, self, res);
+        res
     }
 
     fn debug_check_interior_sorted(&self) {
@@ -528,10 +528,14 @@ impl LinearScan {
                 // Must be partially allocatable.
                 // XXX: also call pos.gap_before()?
                 self.allocate_partially_free_reg(current_ix, mreg, pos);
+                println!("alloc_partially_free_reg({:?}, {:#?})", mreg, self.data.liveness[current_ix]);
+            } else {
+                println!("alloc_free_reg({:?}, {:#?})", mreg, self.data.liveness[current_ix]);
             }
         } else {
             // All blocked. Spill from an active range.
             self.allocate_blocked_reg(current_ix);
+            println!("alloc_blocked_reg({:#?})", self.data.liveness[current_ix]);
         }
     }
 
@@ -562,13 +566,14 @@ impl LinearScan {
 
     fn split_and_assign_reg(&mut self,
                             range_ix_to_split: usize,
-                            split_at: LifetimePosition,
+                            splinter_start: LifetimePosition,
                             reg: MachReg,
                             assign_to: Option<usize>) {
         let splinter = {
             let splinter_ix = self.data.liveness.len();
             let assign_to = assign_to.unwrap_or(splinter_ix);
-            let r = self.data.liveness[range_ix_to_split].split_at(split_at, splinter_ix);
+            let r = self.data.liveness[range_ix_to_split]
+                .split_at(splinter_start, splinter_ix);
             self.data.liveness[assign_to].set_assigned_reg(reg);
             r
         };
@@ -583,16 +588,14 @@ impl LinearScan {
             (current.first_pos().pos, current.last_pos().pos)
         };
         if pos < first_pos {
-            // Need to spill self.
-            // This can only happen if we have multiple block.
-            panic!("No impl: only possible on multiple blocks");
+            panic!("No impl: need to spill pos.");
         } else if pos < last_pos {
             // Partially free, split the other range.
-            // first_pos is usually a def so it's in the INSTR_END pos
-            // and we need to split before that.
-            self.split_and_assign_reg(range_ix, first_pos.gap_before(),
+            self.split_and_assign_reg(range_ix, first_pos,
                                       mreg, Some(current_ix));
             self.active_ranges.push(current_ix);
+        } else if pos == first_pos {
+            panic!("Too many register uses in one position: {:?}", pos);
         } else {
             // Reg is entirely free.
             self.data.liveness[current_ix].set_assigned_reg(mreg);
@@ -759,36 +762,27 @@ impl CommitSpillingPhase {
 
 
     fn run(&mut self) {
-        let mut spill_instrs = HashMap::new();
+        let instrs = &mut self.data.block.instrs;
         for range in &self.data.liveness {
             let vr = range.reg();
             let mr = range.assigned_reg().into_reg();
-            if range.reload_at_start {
+            if let Some(pos) = range.reload_at {
+                debug_assert!(pos.is_gap_end());
                 let slot = self.alloc.slot_for(&vr);
-                // The exact pos might need to be recorded by the regalloc.
-                spill_instrs.insert(range.first_pos().pos.gap_before(),
-                                    Instr::mov(mr.into_op(), slot));
+                let reload = ParallelMove::new(mr.into_op(), slot);
+                instrs[pos.instr_ix()]
+                    .parallel_moves
+                    .add_to_start(reload);
             }
-            if range.spill_at_end {
+            if let Some(pos) = range.spill_at {
+                debug_assert!(pos.is_gap_start());
                 let slot = self.alloc.slot_for(&vr);
-                spill_instrs.insert(range.last_pos().pos,
-                                    Instr::mov(slot, mr.into_op()));
+                let spill = ParallelMove::new(slot, mr.into_op());
+                instrs[pos.instr_ix() - 1]
+                    .parallel_moves
+                    .add_to_end(spill);
             }
         }
-
-        // Merge.
-        let ordinary_instrs: Vec<_> = self.data.block.instrs.drain(..).collect();
-        let mut rs = vec![];
-        for i in 0..ordinary_instrs.len() * STEP {
-            let pos = LifetimePosition::from_computed(i);
-            if pos.is_instr_start() {
-                rs.push(ordinary_instrs[pos.instr_ix()].clone());
-            }
-            for i in spill_instrs.remove(&pos) {
-                rs.push(i);
-            }
-        }
-        self.data.block.instrs = rs;
     }
 }
 

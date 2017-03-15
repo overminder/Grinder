@@ -22,3 +22,11 @@ pub fn ensure_sorted<A: Ord + fmt::Debug>(it: &mut Iterator<Item=A>) -> Result<(
     }
     Ok(())
 }
+
+pub fn some_if<A, F: FnOnce() -> A>(b: bool, f: F) -> Option<A> {
+    if b {
+        Some(f())
+    } else {
+        None
+    }
+}
