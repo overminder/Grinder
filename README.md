@@ -1,6 +1,7 @@
 ### Synopsis
 
-Yet another compiler. This time following modern approaches:
+Yet another compiler. This time following modern approaches (though most of
+them are published ~20 years ago):
 
 - Single unified [sea-of-nodes](
   http://grothoff.org/christian/teaching/2007/3353/papers/click95simple.pdf) SSA IR
