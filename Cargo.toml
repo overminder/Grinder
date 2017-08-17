@@ -1,0 +1,7 @@
+[package]
+name = "gred"
+version = "0.1.0"
+authors = ["tim.jiang"]
+
+[dependencies]
+ordermap = "*"
