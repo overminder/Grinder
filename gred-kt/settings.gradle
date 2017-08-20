@@ -1,0 +1,3 @@
+rootProject.name = 'ssa-graph-reducer'
+
+include ':core'

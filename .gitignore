@@ -1,5 +1,10 @@
-/target/
-**/*.rs.bk
+build
+target
+out
+.gradle
+
+rs.bk
+.*.swp
+
 .idea
 *.iml
-.*.swp
