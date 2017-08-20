@@ -1,9 +1,11 @@
 package com.github.overmind.ssagraph.core
 
+import java.util.*
 import kotlin.coroutines.experimental.buildIterator
 
-data class Graph<A>(internal val nodes: MutableMap<Id, Node<A>> = HashMap()) {
+data class Graph<A: Operator>(internal val nodes: MutableMap<Id, Node<A>> = mutableMapOf()) {
     internal var idGen: Int = INVALID_ID + 1
+    internal val nodeCache = mutableMapOf<Any, Node<A>>()
 
     companion object {
         val INVALID_ID = 0
@@ -13,7 +15,7 @@ data class Graph<A>(internal val nodes: MutableMap<Id, Node<A>> = HashMap()) {
 
     fun edit() = GraphEditor(this)
 
-    interface Reducer<A> {
+    interface Reducer<A: Operator> {
         fun reduce(g: Graph<A>, id: Id): Reduction
     }
 
@@ -37,18 +39,29 @@ data class Graph<A>(internal val nodes: MutableMap<Id, Node<A>> = HashMap()) {
     }
 }
 
-data class GraphEditor<A>(val g: Graph<A>) {
-    fun addNode(op: A): Id {
+data class GraphEditor<A: Operator>(val g: Graph<A>) {
+    fun addNode(op: A, vararg inputs: Id): Id {
+        val key = op.cacheKey(inputs)
+        if (key != null) {
+            val cached = g.nodeCache[key]
+            if (cached != null && Arrays.equals(cached.inputs.toIntArray(), inputs)) {
+                return cached.id
+            }
+        }
         val id = g.idGen++
-        return unsafeNewNode(op, id)
+        val n = Node(id, op)
+        g.nodes[id] = n
+        inputs.forEach {
+            addInput(it, id)
+        }
+        if (key != null) {
+            g.nodeCache[key] = n
+        }
+        return id
     }
 
     fun skipIds(n: Int) {
         g.idGen += n
-    }
-    fun unsafeNewNode(op: A, id: Id): Id {
-        g.nodes[id] = Node(id, op)
-        return id
     }
 
     fun addInput(input: Id, on: Id) {
@@ -58,6 +71,10 @@ data class GraphEditor<A>(val g: Graph<A>) {
         addUse(Use(on, ix), input)
     }
 
+    fun addInputs(inputs: Sequence<Id>, on: Id) {
+        inputs.forEach { addInput(it, on) }
+    }
+
     fun replaceInput(nth: Int, with: Id, on: Id) {
         val onNode = nodeAt(on)
         val old = onNode.inputs[nth]
@@ -65,9 +82,11 @@ data class GraphEditor<A>(val g: Graph<A>) {
             return
         }
         val use = Use(target = on, inputIx = nth)
-        removeUse(use, old)
-        onNode.inputs[nth] = with
+        // Need to add new use before removing old use since the old use might be the only reference
+        // to the new use so the other way around will kill the new use immediately.
         addUse(use, with)
+        onNode.inputs[nth] = with
+        removeUse(use, old)
     }
 
     private fun addUse(use: Use, on: Id) {
@@ -131,6 +150,10 @@ data class GraphEditor<A>(val g: Graph<A>) {
         while (true) {
             val id = ids.firstOrNull() ?: break
             ids.remove(id)
+            if (!g.nodes.containsKey(id)) {
+                // Unvisited nodes could be removed in a previous loop where all its uses were removed.
+                continue
+            }
             val result= r.reduce(g, id)
             if (result is Reduction.Changed) {
                 replace(id, result.id)
