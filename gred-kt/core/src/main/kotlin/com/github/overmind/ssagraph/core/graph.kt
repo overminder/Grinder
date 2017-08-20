@@ -20,6 +20,7 @@ data class Graph<A>(internal val nodes: MutableMap<Id, Node<A>> = HashMap()) {
     fun <B: A> checkOp(klass: Class<B>, id: Id): Node<B>? {
         val n = nodeAt(id)
         if (klass.isInstance(n.op)) {
+            @Suppress("UNCHECKED_CAST")
             return n as Node<B>
         } else {
             return null
@@ -29,6 +30,7 @@ data class Graph<A>(internal val nodes: MutableMap<Id, Node<A>> = HashMap()) {
     fun <B: A> findOp(klass: Class<B>): Iterator<Node<B>> = buildIterator {
         nodes.values.forEach {
             if (klass.isInstance(it.op)) {
+                @Suppress("UNCHECKED_CAST")
                 yield(it as Node<B>)
             }
         }
@@ -36,7 +38,7 @@ data class Graph<A>(internal val nodes: MutableMap<Id, Node<A>> = HashMap()) {
 }
 
 data class GraphEditor<A>(val g: Graph<A>) {
-    fun newNode(op: A): Id {
+    fun addNode(op: A): Id {
         val id = g.idGen++
         return unsafeNewNode(op, id)
     }
