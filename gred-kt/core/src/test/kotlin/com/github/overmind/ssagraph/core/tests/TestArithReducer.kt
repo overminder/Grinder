@@ -75,6 +75,23 @@ class TestArithReducer {
     }
 
     @Test
+    fun testInlineCall() {
+        val funcAdd = mkG {
+            val n1 = addNode(Argument(0))
+            val n2 = addNode(Argument(1))
+            addNode(Add, n1, n2)
+        }.copy(argc = 2)
+        assertArithReduction(mkG {
+            val n1 = addNode(IntLit(1))
+            val n2 = addNode(IntLit(2))
+            addNode(InlineCall(funcAdd), n1, n2)
+        }, mkG {
+            skipIds(4)
+            addNode(IntLit(3))
+        })
+    }
+
+    @Test
     fun testReplaceInput() {
         Assert.assertEquals(mkG {
             val n1 = addNode(IntLit(1))

@@ -3,7 +3,8 @@ package com.github.overmind.ssagraph.core
 import java.util.*
 import kotlin.coroutines.experimental.buildIterator
 
-data class Graph<A: Operator>(internal val nodes: MutableMap<Id, Node<A>> = mutableMapOf()) {
+data class Graph<A: Operator>(internal val nodes: MutableMap<Id, Node<A>> = mutableMapOf(),
+                              internal val argc: Int = 0) {
     internal var idGen: Int = INVALID_ID + 1
     internal val nodeCache = mutableMapOf<Any, Node<A>>()
 

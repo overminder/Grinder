@@ -45,6 +45,8 @@ object End: ArithOp() {
     override fun toString() = "End"
 }
 
+data class InlineCall(val body: AGraph): ArithOp()
+
 object Add: BinaryArithOp("Add", { a, b -> a + b })
 object Sub: BinaryArithOp("Sub", { a, b -> a - b })
 object Lt: BinaryArithOp("Lt", { a, b -> if (a < b) 1 else 0 })

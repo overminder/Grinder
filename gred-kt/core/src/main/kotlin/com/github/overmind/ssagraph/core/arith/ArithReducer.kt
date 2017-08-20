@@ -17,8 +17,37 @@ private class ArithReducerImpl(val g: AGraph) {
             is BinaryArithOp -> reduceBinary(n as Node<BinaryArithOp>)
             is Mov -> reduceMov(n as Node<Mov>)
             is If -> reduceIf(n as Node<If>)
+            is InlineCall -> reduceInlineCall(n as Node<InlineCall>)
             else -> Reduction.Unchanged
         }
+    }
+
+    private fun reduceInlineCall(node: Node<InlineCall>): Reduction {
+        assert(node.inputs.size == node.op.body.argc)
+
+        val mapping = mutableMapOf<Id, Id>()
+        val edit = g.edit()
+        val body = node.op.body
+        fun inlineNode(from: Id): Id {
+            // If already mapped: return it
+            mapping[from]?.let { return it }
+            val fromNode = body.nodeAt(from)
+            fromNode.op.let {
+                if (it is Argument) {
+                    // If is argument: map to node input
+                    return node.inputs[it.ix]
+                }
+            }
+            // Else: build a new node
+            val to = edit.addNode(fromNode.op)
+            mapping[from] = to
+            fromNode.inputs.forEach {
+                edit.addInput(inlineNode(it), to)
+            }
+            return to
+        }
+        val retVal = inlineNode(body.retValNode.id)
+        return Reduction.Changed(retVal)
     }
 
     private fun reduceIf(n: Node<If>): Reduction {
