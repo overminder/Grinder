@@ -6,6 +6,7 @@ import kotlin.coroutines.experimental.buildIterator
 data class Graph<A: Operator>(internal val nodes: MutableMap<Id, Node<A>> = mutableMapOf(),
                               internal val argc: Int = 0) {
     internal var idGen: Int = INVALID_ID + 1
+    // XXX: How about mutable nodes? Nodes that are killed?
     internal val nodeCache = mutableMapOf<Any, Node<A>>()
 
     companion object {
@@ -46,6 +47,7 @@ data class GraphEditor<A: Operator>(val g: Graph<A>) {
         if (key != null) {
             val cached = g.nodeCache[key]
             if (cached != null && Arrays.equals(cached.inputs.toIntArray(), inputs)) {
+                // As the node can be
                 return cached.id
             }
         }
@@ -118,7 +120,7 @@ data class GraphEditor<A: Operator>(val g: Graph<A>) {
         }
 
         if (onNode.uses.isEmpty()) {
-            // If no one is using this node: kill it.
+            // Select no one is using this node: kill it.
             kill(on)
         }
     }

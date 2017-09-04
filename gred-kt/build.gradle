@@ -19,6 +19,10 @@ subprojects {
         mavenCentral()
     }
 
+    ext.libraries = [
+        jnr_ffi: 'com.github.jnr:jnr-ffi:2.1.6',
+    ]
+
     dependencies {
         compile "org.jetbrains.kotlin:kotlin-stdlib-jre8:$kotlin_version"
         testCompile 'junit:junit:4.12'

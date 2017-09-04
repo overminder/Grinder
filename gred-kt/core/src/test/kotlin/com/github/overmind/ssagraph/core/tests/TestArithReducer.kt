@@ -38,7 +38,7 @@ class TestArithReducer {
             val n1 = addNode(IntLit(0))
             val n2 = addNode(IntLit(1))
             val n3 = addNode(IntLit(2))
-            val nif = addNode(If, n1, n2, n3)
+            val nif = addNode(Select, n1, n2, n3)
             nif
         }, mkG {
             skipIds(2)
@@ -50,7 +50,7 @@ class TestArithReducer {
             val n1 = addNode(Argument(0))
             val n2 = addNode(Argument(1))
             val n3 = addNode(Argument(1))
-            val nif = addNode(If, n1, n2, n3)
+            val nif = addNode(Select, n1, n2, n3)
             nif
         }, mkG {
             skipIds(1)
@@ -66,7 +66,7 @@ class TestArithReducer {
             val na = addNode(Add, n1, n2)
             val nt = addNode(Argument(1))
             val nf = addNode(Argument(2))
-            val nif = addNode(If, na, nt, nf)
+            val nif = addNode(Select, na, nt, nf)
             nif
         }, mkG {
             skipIds(3)
@@ -84,7 +84,7 @@ class TestArithReducer {
         assertArithReduction(mkG {
             val n1 = addNode(IntLit(1))
             val n2 = addNode(IntLit(2))
-            addNode(InlineCall(funcAdd), n1, n2)
+            addNode(KnownApply(funcAdd), n1, n2)
         }, mkG {
             skipIds(4)
             addNode(IntLit(3))
@@ -126,8 +126,8 @@ class TestArithReducer {
     @Test
     fun testCache() {
         mkG {
-            val a1 = Argument(0).cacheKey(intArrayOf())
-            val a2 = Argument(0).cacheKey(intArrayOf())
+            val a1 = Argument(0).cacheKey(intArrayOf())!!
+            val a2 = Argument(0).cacheKey(intArrayOf())!!
             Assert.assertEquals(a1, a2)
             Assert.assertEquals(a1.hashCode(), a2.hashCode())
             val n1 = addNode(Argument(0))

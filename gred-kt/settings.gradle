@@ -2,3 +2,7 @@ rootProject.name = 'ssa-graph-reducer'
 
 include ':core'
 include ':cli'
+include ':graphlib'
+
+// Pipeline, from low to high level
+include ':asm'

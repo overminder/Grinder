@@ -39,25 +39,42 @@ private class ArithInterpreterImpl(top: ArithInterpreter) {
         return res
     }
 
+    fun exec(n: ANode) {
+    }
+
     @Suppress("UNCHECKED_CAST")
     fun evalFully(n: ANode): Int = when (n.op) {
         is BinaryArithOp -> evalBinary(n as Node<BinaryArithOp>)
         is Mov -> evalMov(n as Node<Mov>)
-        is If -> evalIf(n as Node<If>)
+        is Select -> evalIf(n as Node<Select>)
         is IntLit -> n.op.value
-        is Argument -> args[n.op.ix]
+        is Argument -> evalArgument(n as Node<Argument>)
         is End -> eval(n.inputs.single())
-        is InlineCall -> evalInlineCall(n as Node<InlineCall>)
+        is KnownApply -> evalKnownApply(n as Node<KnownApply>)
+        is Start -> TODO()
+        Branch -> TODO()
+        IfTrue -> TODO()
+        IfFalse -> TODO()
+        is Phi -> TODO()
     }
 
-    private fun evalInlineCall(node: Node<InlineCall>): Int {
+    private fun evalArgument(node: Node<Argument>): Int {
+        val ix = node.op.ix
+        val from = g.nodeAt(node.uses.single().target)
+        return when (from.op) {
+            is Start -> args[ix]
+            else -> error("Unknown projection($ix) from ${from}")
+        }
+    }
+
+    private fun evalKnownApply(node: Node<KnownApply>): Int {
         val args= node.inputs.map(this::eval)
         val res = ArithInterpreter(node.op.body, args.toIntArray()).eval()
         reductions += res.reductions
         return res.result
     }
 
-    private fun evalIf(node: Node<If>): Int {
+    private fun evalIf(node: Node<Select>): Int {
         return if (eval(node.cond) != 0) {
             eval(node.t)
         } else {

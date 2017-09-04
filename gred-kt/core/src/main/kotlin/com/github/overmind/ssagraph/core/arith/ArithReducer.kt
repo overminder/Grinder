@@ -16,25 +16,29 @@ private class ArithReducerImpl(val g: AGraph) {
         return when (n.op) {
             is BinaryArithOp -> reduceBinary(n as Node<BinaryArithOp>)
             is Mov -> reduceMov(n as Node<Mov>)
-            is If -> reduceIf(n as Node<If>)
-            is InlineCall -> reduceInlineCall(n as Node<InlineCall>)
+            is Select -> reduceSelect(n as Node<Select>)
+            is KnownApply -> reduceKnownApply(n as Node<KnownApply>)
             else -> Reduction.Unchanged
         }
     }
 
-    private fun reduceInlineCall(node: Node<InlineCall>): Reduction {
+    private fun reduceKnownApply(node: Node<KnownApply>): Reduction {
         assert(node.inputs.size == node.op.body.argc)
+        if (g === node.op.body) {
+            // Recursive call: can't inline
+            return Reduction.Unchanged
+        }
 
         val mapping = mutableMapOf<Id, Id>()
         val edit = g.edit()
         val body = node.op.body
         fun inlineNode(from: Id): Id {
-            // If already mapped: return it
+            // Select already mapped: return it
             mapping[from]?.let { return it }
             val fromNode = body.nodeAt(from)
             fromNode.op.let {
                 if (it is Argument) {
-                    // If is argument: map to node input
+                    // Select is argument: map to node input
                     return node.inputs[it.ix]
                 }
             }
@@ -50,7 +54,7 @@ private class ArithReducerImpl(val g: AGraph) {
         return Reduction.Changed(retVal)
     }
 
-    private fun reduceIf(n: Node<If>): Reduction {
+    private fun reduceSelect(n: Node<Select>): Reduction {
         if (n.t == n.f) {
             return Reduction.Changed(n.t)
         }
