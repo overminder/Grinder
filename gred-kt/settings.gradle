@@ -6,3 +6,4 @@ include ':graphlib'
 
 // Pipeline, from low to high level
 include ':asm'
+include ':lsra'

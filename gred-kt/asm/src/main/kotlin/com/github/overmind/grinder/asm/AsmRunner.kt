@@ -21,7 +21,11 @@ object AsmRunner {
         f.autoDelete().use {
             f.writeText(source)
             val cmd = arrayOf("gcc", "-shared", "-fPIC", f.absolutePath, "-o", dst.absolutePath)
-            Runtime.getRuntime().exec(cmd).waitFor()
+            val proc = ProcessBuilder().apply {
+                command(*cmd)
+                inheritIO()
+            }.start()
+            assert(proc.waitFor() == 0)
         }
     }
 
@@ -30,11 +34,13 @@ object AsmRunner {
         return lib.grinderEntry(arg)
     }
 
-    val ENTRY_NAME = if (isMac()) {
-        "_" + ENTRY_NAME_RAW
+    fun nameForLinkage(name: String) = if (isMac()) {
+        "_$name"
     } else {
-        ENTRY_NAME_RAW
+        name
     }
+
+    val ENTRY_NAME = "grinderEntry"
 }
 
 private fun isMac(): Boolean {
@@ -45,5 +51,3 @@ private fun isMac(): Boolean {
 interface GrinderDylib {
     fun grinderEntry(arg: Long): Long
 }
-
-private val ENTRY_NAME_RAW = "grinderEntry"
