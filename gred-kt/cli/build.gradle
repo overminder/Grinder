@@ -1,0 +1,7 @@
+apply plugin: 'application'
+
+mainClassName = 'com.github.overmind.ssagraph.cli.MainKt'
+
+dependencies {
+    compile project(':core')
+}
