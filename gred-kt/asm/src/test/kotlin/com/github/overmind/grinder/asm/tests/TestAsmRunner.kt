@@ -39,7 +39,7 @@ class TestAsmRunner {
     @Test
     fun testInstructionBlock() {
         val block = InstructionBlock(AsmRunner.ENTRY_NAME, true, listOf(
-                Instruction.of(OpCode.LEA, Mem(Reg.RDI.id, index = Reg.RDI.id, disp = 2), Reg.RAX),
+                Instruction.of(OpCode.LEA, Mem(Reg.RDI, index = Reg.RDI, disp = 2), Reg.RAX),
                 Instruction.of(OpCode.RET)
         ))
         expectResult(block.renderAtnt(), 20, 42)
@@ -51,7 +51,7 @@ class TestAsmRunner {
                 Instruction.of(OpCode.JMP, Label("end"))
         ))
         val end = InstructionBlock("end", body = listOf(
-                Instruction.of(OpCode.LEA, Mem(Reg.RDI.id, index = Reg.RDI.id, disp = 2), Reg.RAX),
+                Instruction.of(OpCode.LEA, Mem(Reg.RDI, index = Reg.RDI, disp = 2), Reg.RAX),
                 Instruction.of(OpCode.RET)
         ))
         expectResult(InstructionBlocks(listOf(end, start)).renderAtnt(), 20, 42)
@@ -71,6 +71,16 @@ class TestAsmRunner {
                 Instruction.of(OpCode.RET)
         ))
         expectResult(InstructionBlocks(listOf(start, t)).renderAtnt(), 1, 1)
+    }
+
+    @Test
+    fun testNeg() {
+        val block = InstructionBlock(AsmRunner.ENTRY_NAME, true, listOf(
+                Instruction.of(OpCode.NEG, Reg.RDI),
+                Instruction.of(OpCode.MOV, Reg.RDI, Reg.RAX),
+                Instruction.of(OpCode.RET)
+        ))
+        expectResult(block.renderAtnt(), 20, -20)
     }
 
     @Test

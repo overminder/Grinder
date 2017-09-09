@@ -22,14 +22,26 @@ data class InstructionBlock(val name: String, val global: Boolean = false, val b
         append("$linkageName:\n")
         append(body.asSequence().map { it.renderAtnt() }.joinToString("\n"))
     }
+
+    companion object {
+        private var nextId = 1
+
+        fun local(vararg body: Instruction): InstructionBlock {
+            return InstructionBlock(".L${nextId++}", body = body.toList())
+        }
+    }
 }
 
 data class Instruction private constructor(val op: OpCode,
                                            val inputs: List<Operand> = emptyList(),
                                            val outputs: List<Operand> = emptyList()): AtntSyntax {
-    init {
-        op.checkArgs(inputs, outputs)
-    }
+
+    val synthesizedInputs: List<Operand>
+        get() = if (op.sameAsLastInput) {
+            inputs + outputs[0]
+        } else {
+            inputs
+        }
 
     private fun allOperands() = (inputs ?: emptyList()) + (outputs ?: emptyList())
 
@@ -58,13 +70,8 @@ data class Instruction private constructor(val op: OpCode,
         }
 
         fun of(op: OpCode, src: Operand, dst: Operand): Instruction {
-            assert(op.arity == 2)
-            return if (op.outputCount == 1) {
-                Instruction(op, listOf(src), listOf(dst))
-            } else {
-                assert(op.outputCount == 0)
-                Instruction(op, listOf(src, dst))
-            }
+            val (inputs, outputs) = op.prepareArgs(src, dst)
+            return Instruction(op, inputs, outputs)
         }
     }
 }
@@ -91,30 +98,27 @@ data class OpCode(val name: String,
                   val inputCount: Int,
                   val outputCount: Int = 0,
                   // Properties
-                  val inplace: Boolean = false,
+                  val sameAsLastInput: Boolean = false,  // Last input is also the output.
                   val isCall: Boolean = false,
                   val isJmp: Boolean = false,
                   val jmpCondition: JmpCondition? = null,
                   val isRet: Boolean = false): AtntSyntax {
     init {
-        if (inplace) {
-            assert(inputCount == 2)
-            assert(outputCount == 1)
+        if (sameAsLastInput) {
+            assert(inputCount >= 1)
+            assert(outputCount == 0)
         }
     }
 
-    fun checkArgs(actualInputs: List<Operand>, actualOutputs: List<Operand>) {
-        val nInputs = actualInputs.size
-        val nOutputs = actualOutputs.size
-        if (inplace) {
-            assert(nInputs == 1)
-            assert(nOutputs == 1)
+    fun prepareArgs(opr1: Operand, opr2: Operand): Pair<List<Operand>, List<Operand>> {
+        val oprs = listOf(opr1, opr2)
+        assert(oprs.any { it is Reg })
+        assert(arity == 2)
+        return if (inputCount == 1) {
+            listOf(opr1).to(listOf(opr2))
         } else {
-            assert(nInputs == inputCount)
-            assert(nOutputs == outputCount)
-        }
-        if (arity == 2) {
-            assert((actualInputs + actualOutputs).any { it is Reg })
+            assert(inputCount == 2)
+            oprs.to(emptyList())
         }
     }
 
@@ -125,21 +129,19 @@ data class OpCode(val name: String,
             name
         }
     }
-    val arity: Int
-        get() = inputCount + outputCount - (if (inplace) 1 else 0)
 
     companion object {
         private val SRC_DST = OpCode("XXX-SRC-DST", 1, 1)
-
         val MOV = SRC_DST.copy("mov")
         val MOVQ = SRC_DST.copy("movq")
         val LEA = SRC_DST.copy("lea")
 
         val CMP = OpCode("cmp", 2)
 
-        private val INPLACE = OpCode("XXX-INPLACE", 2, 1, inplace = true)
+        private val INPLACE = OpCode("XXX-INPLACE", 2, 0, sameAsLastInput = true)
         val ADD = INPLACE.copy("add")
         val SUB = INPLACE.copy("sub")
+        val NEG = INPLACE.copy("neg", inputCount = 1)
 
         private val J = OpCode("XXX-J", 1, isJmp = true)
         val JMP = J.copy("jmp")
@@ -154,7 +156,12 @@ data class OpCode(val name: String,
         val POP = OpCode("pop", 0, 1)
 
         val RET = OpCode("ret", 0, isRet = true)
+
+        // val REGR = OpCode("ret", inputCount = 1)
     }
+
+    val arity: Int
+        get() = inputCount + outputCount
 }
 
 enum class Scale: AtntSyntax {
@@ -171,7 +178,8 @@ enum class Scale: AtntSyntax {
     }.toString()
 }
 
-sealed class Operand: AtntSyntax
+sealed class Operand: AtntSyntax {
+}
 
 data class Imm(val value: Int): Operand() {
     override fun renderAtnt() = "$" + value
@@ -182,30 +190,46 @@ data class Label(val name: String, val deref: Boolean = false): Operand() {
     override fun renderAtnt() = if (deref) "$" + name else name
 }
 
-data class Reg(val id: Int): Operand() {
+data class Reg private constructor(val id: Int): Operand() {
     override fun renderAtnt(): String = "%" + REG_NAMES[id]
+
+    override fun toString(): String {
+        return if (isAllocated) {
+            renderAtnt()
+        } else {
+            "%v${id - PHYSICAL_COUNT}"
+        }
+    }
 
     companion object {
         val RAX = Reg(0)
         val RSI = Reg(6)
         val RDI = Reg(7)
+
+        private val PHYSICAL_COUNT = REG_NAMES.size
+        private var nextId = 0
+        fun mkVirtual(): Reg = Reg(PHYSICAL_COUNT + nextId++)
+        fun mkPhysical(id: Int): Reg {
+            assert(id < PHYSICAL_COUNT)
+            return Reg(id)
+        }
     }
 
     val isAllocated: Boolean
-        get() = id < REG_NAMES.size
+        get() = id < PHYSICAL_COUNT
 }
 
-data class Mem(val base: Int, val disp: Int? = null, val index: Int? = null, val scale: Scale? = null): Operand() {
+data class Mem(val base: Reg, val disp: Int? = null, val index: Reg? = null, val scale: Scale? = null): Operand() {
     override fun renderAtnt() = buildString {
         if (disp != null) {
             append(disp)
         }
         append("(")
-        append(Reg(base).renderAtnt())
+        append(base.renderAtnt())
 
         if (index != null) {
             append(", ")
-            append(Reg(index).renderAtnt())
+            append(index.renderAtnt())
         }
 
         if (scale != null) {
@@ -213,6 +237,10 @@ data class Mem(val base: Int, val disp: Int? = null, val index: Int? = null, val
             append(scale.renderAtnt())
         }
         append(")")
+    }
+
+    fun regs(): List<Reg> {
+        return listOf(base) + (index?.let { listOf(it) } ?: emptyList())
     }
 }
 
