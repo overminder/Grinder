@@ -1,17 +1,32 @@
 package com.github.overmind.grinder.asm
 
+import kotlin.coroutines.experimental.buildSequence
+
 interface AtntSyntax {
-    fun renderAtnt(): String
+    fun renderAtnt() = renderAtntWithDef(DefaultAtntSyntaxDef)
+    fun renderAtntWithDef(def: AtntSyntaxDef): String
+}
+
+interface AtntSyntaxDef {
+    val allowVirtualReg: Boolean
+}
+
+object DefaultAtntSyntaxDef: AtntSyntaxDef {
+    override val allowVirtualReg: Boolean = false
+}
+
+object RelaxedAtntSyntaxDef: AtntSyntaxDef {
+    override val allowVirtualReg: Boolean = true
 }
 
 data class InstructionBlocks(val bs: List<InstructionBlock>): AtntSyntax {
-    override fun renderAtnt(): String {
-        return bs.map { it.renderAtnt() }.joinToString("\n")
+    override fun renderAtntWithDef(def: AtntSyntaxDef): String {
+        return bs.map { it.renderAtntWithDef(def) }.joinToString("\n")
     }
 }
 
 data class InstructionBlock(val name: String, val global: Boolean = false, val body: List<Instruction>): AtntSyntax {
-    override fun renderAtnt() = buildString {
+    override fun renderAtntWithDef(def: AtntSyntaxDef) = buildString {
         val linkageName = if (global) {
             val name1 = AsmRunner.nameForLinkage(name)
             append("\t.globl $name1\n")
@@ -20,7 +35,7 @@ data class InstructionBlock(val name: String, val global: Boolean = false, val b
             name
         }
         append("$linkageName:\n")
-        append(body.asSequence().map { it.renderAtnt() }.joinToString("\n"))
+        append(body.asSequence().map { it.renderAtntWithDef(def) }.joinToString("\n"))
     }
 
     companion object {
@@ -45,12 +60,12 @@ data class Instruction private constructor(val op: OpCode,
 
     private fun allOperands() = (inputs ?: emptyList()) + (outputs ?: emptyList())
 
-    override fun renderAtnt() = buildString {
+    override fun renderAtntWithDef(def: AtntSyntaxDef) = buildString {
         append("\t")
-        append(op.renderAtnt())
+        append(op.renderAtntWithDef(def))
         append("\t")
         allOperands().let {
-            append(it.map { it.renderAtnt() }.joinToString(", "))
+            append(it.map { it.renderAtntWithDef(def) }.joinToString(", "))
         }
     }
 
@@ -73,6 +88,38 @@ data class Instruction private constructor(val op: OpCode,
             val (inputs, outputs) = op.prepareArgs(src, dst)
             return Instruction(op, inputs, outputs)
         }
+    }
+
+    fun mapReg(f0: (Reg) -> Reg): Instruction {
+        val f: (Operand) -> Operand = { it.mapReg(f0) }
+        return Instruction(op, inputs.map(f), outputs.map(f))
+    }
+
+    fun mapRegAt(ix: OperandIx, f: (Reg) -> Reg): Instruction {
+        val (newInputs, newOutputs) = if (ix.isInput) {
+            inputs.toMutableList().let {
+                it[ix.nth] = it[ix.nth].mapReg(f)
+                it.to(outputs)
+            }
+        } else {
+            outputs.toMutableList().let {
+                it[ix.nth] = it[ix.nth].mapReg(f)
+                inputs.to(it)
+            }
+        }
+        return Instruction(op, newInputs, newOutputs)
+    }
+
+    val operandIxs
+        get() = buildSequence {
+            inputs.forEachIndexed { index, _ -> yield(OperandIx(index, isInput = true)) }
+            outputs.forEachIndexed { index, _ -> yield(OperandIx(index, isInput = false)) }
+        }
+}
+
+data class OperandIx(val nth: Int, val isInput: Boolean) {
+    companion object {
+        val DUMMY = OperandIx(-1, false)
     }
 }
 
@@ -122,7 +169,7 @@ data class OpCode(val name: String,
         }
     }
 
-    override fun renderAtnt(): String {
+    override fun renderAtntWithDef(def: AtntSyntaxDef): String {
         return if (isJmp && jmpCondition != null) {
             "j" + jmpCondition.toString().toLowerCase()
         } else {
@@ -170,7 +217,7 @@ enum class Scale: AtntSyntax {
     S4,
     S8;
 
-    override fun renderAtnt() = when (this) {
+    override fun renderAtntWithDef(def: AtntSyntaxDef) = when (this) {
         S1 -> 1
         S2 -> 2
         S4 -> 4
@@ -179,30 +226,38 @@ enum class Scale: AtntSyntax {
 }
 
 sealed class Operand: AtntSyntax {
+    fun mapReg(f: (Reg) -> Reg): Operand = when (this) {
+        is Reg -> f(this)
+        is Mem -> copy(base = f(base), index = index?.let(f))
+        else -> this
+    }
 }
 
 data class Imm(val value: Int): Operand() {
-    override fun renderAtnt() = "$" + value
+    override fun renderAtntWithDef(def: AtntSyntaxDef) = "$" + value
 }
 
 data class Label(val name: String, val deref: Boolean = false): Operand() {
     // XXX: Two kinds of addressing mode
-    override fun renderAtnt() = if (deref) "$" + name else name
+    override fun renderAtntWithDef(def: AtntSyntaxDef) = if (deref) "$" + name else name
 }
 
 data class Reg private constructor(val id: Int): Operand() {
-    override fun renderAtnt(): String = "%" + REG_NAMES[id]
-
-    override fun toString(): String {
-        return if (isAllocated) {
-            renderAtnt()
-        } else {
+    override fun renderAtntWithDef(def: AtntSyntaxDef): String {
+        return if (isPhysical) {
+            "%" + REG_NAMES[id]
+        } else if (def.allowVirtualReg) {
             "%v${id - PHYSICAL_COUNT}"
+        } else {
+            throw IllegalStateException("Reg($id): not a valid id")
         }
     }
 
+    override fun toString() = renderAtntWithDef(RelaxedAtntSyntaxDef)
+
     companion object {
         val RAX = Reg(0)
+        val RSP = Reg(4)
         val RSI = Reg(6)
         val RDI = Reg(7)
 
@@ -213,28 +268,31 @@ data class Reg private constructor(val id: Int): Operand() {
             assert(id < PHYSICAL_COUNT)
             return Reg(id)
         }
+
     }
 
-    val isAllocated: Boolean
+    val isPhysical: Boolean
         get() = id < PHYSICAL_COUNT
+    val isVirtual
+        get() = !isPhysical
 }
 
 data class Mem(val base: Reg, val disp: Int? = null, val index: Reg? = null, val scale: Scale? = null): Operand() {
-    override fun renderAtnt() = buildString {
+    override fun renderAtntWithDef(def: AtntSyntaxDef) = buildString {
         if (disp != null) {
             append(disp)
         }
         append("(")
-        append(base.renderAtnt())
+        append(base.renderAtntWithDef(def))
 
         if (index != null) {
             append(", ")
-            append(index.renderAtnt())
+            append(index.renderAtntWithDef(def))
         }
 
         if (scale != null) {
             append(", ")
-            append(scale.renderAtnt())
+            append(scale.renderAtntWithDef(def))
         }
         append(")")
     }

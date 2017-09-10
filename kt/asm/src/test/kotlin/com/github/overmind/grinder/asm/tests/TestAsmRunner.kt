@@ -6,11 +6,9 @@ import org.junit.Test
 
 class TestAsmRunner {
     fun expectResult(source: String, arg: Long, expected: Long) {
-        // println(source)
-        val dylib = AsmRunner.compileAndLinkDylib(source)
-        dylib.autoDelete().let {
-            println("Dylib saved to: $dylib")
-            val res = AsmRunner.runDylibLL(dylib, arg)
+        AsmTestUtils.run(source) {
+            println("Dylib saved to: $dylibPath")
+            val res = call(arg)
             var hasError = false
             try {
                 Assert.assertEquals(expected, res)
@@ -19,7 +17,7 @@ class TestAsmRunner {
                 throw e
             } finally {
                 if (!hasError) {
-                    it.close()
+                    close()
                 }
             }
         }

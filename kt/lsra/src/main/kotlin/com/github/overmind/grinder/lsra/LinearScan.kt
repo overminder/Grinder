@@ -2,271 +2,7 @@ package com.github.overmind.grinder.lsra
 
 import com.github.overmind.grinder.asm.*
 
-class BlockLiveness(val block: InstructionBlock, val liveOut: Set<Reg>) {
-    val nPos = block.body.size * 2
-
-    private val liveNow = liveOut.toMutableSet()
-    val liveIn = mutableSetOf<Reg>()
-    private val usePos = mutableMapOf<Reg, MutableList<UsePosition>>()
-    val liveRanges = mutableMapOf<Reg, LiveRange>()
-
-    fun addDef(opr: Operand, pos: Int) {
-        when (opr) {
-            is Reg -> addDef(opr, pos)
-            is Mem -> opr.regs().forEach { addUse(it, pos) }
-        }
-    }
-
-    fun addDef(r: Reg, pos: Int) {
-        if (liveNow.remove(r)) {
-            addUsePos(UsePosition(r, pos, UsePosition.Kind.Write))
-        }
-    }
-
-    fun addUsePos(upos: UsePosition) {
-        usePos.compute(upos.reg) { _, v0 ->
-            val v = v0 ?: mutableListOf()
-            v += upos
-            v
-        }
-    }
-
-    fun addUse(opr: Operand, pos: Int) {
-        when (opr) {
-            is Reg -> addUse(opr, pos)
-            is Mem -> opr.regs().forEach { addUse(it, pos) }
-        }
-    }
-
-    fun addUse(r: Reg, pos: Int) {
-        if (liveNow.add(r)) {
-            addUsePos(UsePosition(r, pos, UsePosition.Kind.Read))
-        }
-    }
-
-    fun addInplaceUse(opr: Operand, pos: Int) {
-        when (opr) {
-            is Reg -> addInplaceUse(opr, pos)
-            is Mem -> opr.regs().forEach { addUse(it, pos) }
-        }
-    }
-
-    fun addInplaceUse(r: Reg, pos: Int) {
-        liveNow.add(r)
-        addUsePos(UsePosition(r, pos, UsePosition.Kind.ReadWrite))
-    }
-
-    fun compute() {
-        block.body.withIndex().reversed().forEach { (rawIx, instr) ->
-            val pos = rawIx * 2
-            instr.outputs.forEach {
-                addDef(it, pos)
-            }
-            instr.inputs.forEachIndexed { ix, opr ->
-                if (ix == instr.inputs.size - 1 && instr.op.sameAsLastInput) {
-                    // Same as last input: inplace use
-                    addInplaceUse(opr, pos)
-                } else {
-                    addUse(opr, pos)
-                }
-            }
-        }
-        liveIn.addAll(liveNow)
-        linkLiveRange()
-
-        fixLiveInOut()
-        verify()
-    }
-
-    private fun linkLiveRange() {
-        usePos.forEach { r, poses ->
-            val sorted = poses.sortedWith(UsePosition.ORDER_BY_IX_AND_KIND)
-            val rg = LiveRange(sorted)
-            if (r.isAllocated) {
-                rg.allocated = r
-            }
-            liveRanges[r] = rg
-        }
-    }
-
-    fun fixLiveInOut() {
-        liveIn.forEach {
-            assert(it.isAllocated)
-            liveRanges.compute(it) { r: Reg, rg0: LiveRange? ->
-                val rg = rg0!!
-                val posBefore = UsePosition(r, Int.MIN_VALUE, UsePosition.Kind.Write)
-                rg.copy(poses = listOf(posBefore) + rg.poses)
-            }
-        }
-        liveOut.forEach {
-            assert(it.isAllocated)
-            liveRanges.compute(it) { r: Reg, rg0: LiveRange? ->
-                val rg = rg0!!
-                val posAfter = UsePosition(r, Int.MAX_VALUE, UsePosition.Kind.Read)
-                rg.copy(poses = rg.poses + listOf(posAfter))
-            }
-        }
-    }
-
-    fun verify() {
-        liveRanges.forEach { _, u -> u.verify() }
-    }
-}
-
-data class UsePosition(val reg: Reg, val ix: Int, val kind: Kind) {
-    enum class Kind {
-        Read,
-        ReadWrite,
-        Write;
-
-        val hasRead: Boolean
-            get() = this != Kind.Write
-
-        val hasWrite: Boolean
-            get() = this != Kind.Read
-
-        // Used to further order an UsePosition when LSRAing.
-        val useOrder: Int
-            get() = when (this) {
-                Read -> 0
-                else -> 1
-            }
-    }
-
-    val read: Boolean
-        get() = kind.hasRead
-
-    val write: Boolean
-        get() = kind.hasWrite
-
-    override fun toString(): String {
-        val r = if (read) "R" else ""
-        val w = if (write) "W" else ""
-        return "[$ix] $reg $r$w"
-    }
-
-    companion object {
-        val ORDER_BY_IX_AND_KIND: Comparator<UsePosition>
-            get() = compareBy<UsePosition> {
-                it.ix
-            }.thenBy {
-                it.kind.useOrder
-            }
-    }
-}
-
-data class LiveRange(val poses: List<UsePosition>, var allocated: Reg? = null) {
-    fun verify() {
-        assert(poses.size >= 2)
-    }
-
-    val firstUsePosition: UsePosition
-        get() = poses.first()
-
-    val lastUsePosition: UsePosition
-        get() = poses.last()
-
-    val virtualReg: Reg
-        get() = firstUsePosition.reg
-
-    val groupByRealLiveness: List<LivenessGroup>
-        get() {
-            val res = mutableListOf<LivenessGroup>()
-            var from: Int? = null
-            var to: Int? = null
-            poses.forEachIndexed { ix, pos ->
-                if (pos.write) {
-                    if (pos.read) {
-                        // Inplace: continue
-                        to = ix
-                    } else {
-                        // New def: commit current
-                        if (from == null) {
-                            // Entirely new.
-                            from = ix
-                        } else {
-                            assert(to != null)
-                            res += LivenessGroup(from!!, to!!, this)
-                            from = ix
-                        }
-                    }
-                } else {
-                    assert(pos.read)
-                    // Read only: continue
-                    to = ix
-                }
-            }
-            if (from != null) {
-                res += LivenessGroup(from!!, to!!, this)
-            }
-            return res
-        }
-
-
-    companion object {
-        val DUMMY = LiveRange(listOf(
-                UsePosition(Reg.RAX, -1, kind = UsePosition.Kind.Write),
-                UsePosition(Reg.RAX, -1, kind = UsePosition.Kind.Read)
-        ))
-    }
-
-    operator fun contains(other: UsePosition): Boolean {
-        groupByRealLiveness.forEach {
-            val from = it.from
-            val to = it.to
-            return if (from.ix < other.ix && other.ix < to.ix) {
-                true
-            } else if (other.ix == to.ix) {
-                assert(to.read)
-                assert(other.write && !other.read)
-                true
-            } else {
-                false
-            }
-        }
-        return false
-    }
-
-    fun endsBefore(otherIx: Int): Boolean {
-        // Can be = as other.lastUse is always a read, which will not interfere with currentPos.
-        // XXX: What if other needs to be reloaded?
-        return lastUsePosition.ix <= otherIx
-    }
-
-    fun endsBefore(other: UsePosition): Boolean {
-        return endsBefore(other.ix)
-    }
-
-    fun firstPosOfNextIntersection(other: LiveRange): Int? {
-        val myGroups = groupByRealLiveness
-        val otherGroups = other.groupByRealLiveness
-
-        myGroups.forEach {
-            val from = it.from
-            val to = it.to
-            otherGroups.forEach {
-                if (to.ix <= it.from.ix || it.to.ix <= from.ix) {
-                    // No intersection
-                } else {
-                    return listOf(from.ix, to.ix, it.from.ix, it.to.ix).sorted()[1]
-                }
-            }
-        }
-        return null
-    }
-}
-
-data class LivenessGroup(val fromIx: Int, val toIx: Int, val belongsTo: LiveRange) {
-    val from
-        get() = belongsTo.poses[fromIx]
-
-    val to
-        get() = belongsTo.poses[toIx]
-}
-
-typealias LiveRangeMap = Map<Reg, LiveRange>
-
-class LinearScan(liveRanges: LiveRangeMap, val physicalRegs: List<Reg>) {
+class LinearScan(val liveRanges: LiveRangeMap, val physicalRegs: List<Reg>) {
     val unhandled: MutableList<LiveRange>
     val fixed: List<LiveRange>
     val active = mutableListOf<LiveRange>()
@@ -277,8 +13,15 @@ class LinearScan(liveRanges: LiveRangeMap, val physicalRegs: List<Reg>) {
     val currentPosition
         get() = current.firstUsePosition
 
+    val spills = mutableMapOf<Int, MutableSet<SpillReloadPair>>()
+    // | Note that we don't actually need the previously used physical reg in reloadMap.
+    // Still we preserve the duality for easier coding.
+    val reloads = mutableMapOf<Int, MutableSet<SpillReloadPair>>()
+    val allocatedSpillSlot = mutableMapOf<Reg, Int>()
+    var nextSpillSlot = 0
+
     init {
-        val sorted = liveRanges.values.sortedByDescending { it.firstUsePosition.ix }
+        val sorted = liveRanges.values.sortedByDescending { it.firstUsePosition.instrIx }
         fixed = sorted.filter { it.allocated != null }
         unhandled = sorted.filter { it.allocated == null }.toMutableList()
     }
@@ -291,7 +34,7 @@ class LinearScan(liveRanges: LiveRangeMap, val physicalRegs: List<Reg>) {
             checkActiveInactive(fromActive = false)
 
             if (!tryAllocateFree()) {
-                assert(false) {"allocateBlockedReg" }
+                allocateBlocked()
             }
             // If current has an allocated reg: add to active
             if (current.allocated != null) {
@@ -314,33 +57,94 @@ class LinearScan(liveRanges: LiveRangeMap, val physicalRegs: List<Reg>) {
         }
 
         inactive.forEach {
-            val intersection = it.firstPosOfNextIntersection(current)!!
+            val intersection = it.nextIntersection(current)!!
             regsFreeUntil[it.allocated!!] = intersection
         }
 
         fixed.forEach {
-            val intersection = it.firstPosOfNextIntersection(current)
-            if (intersection != null) {
-                regsFreeUntil[it.allocated!!] = intersection
+            it.nextIntersection(current)?.let { sect ->
+                regsFreeUntil[it.allocated!!] = sect
             }
         }
 
-        val mostFreeReg = regsFreeUntil.maxBy { it.value }!!
+        val farthestUse = regsFreeUntil.maxBy { it.value }!!
         return when {
-            mostFreeReg.value == 0 -> {
+            farthestUse.value <= currentPosition.instrIx -> {
                 // Not free.
                 false
             }
-            current.endsBefore(mostFreeReg.value) -> {
+            current.endsBefore(farthestUse.value) -> {
                 // Full allocation
-                current.allocated = mostFreeReg.key
+                current.allocated = farthestUse.key
                 true
             }
             else -> {
                 // Partial allocation
-                current.allocated = mostFreeReg.key
-                assert(false) { "Partial allocation" }
+                current.allocated = farthestUse.key
+                println("Partial alloc: $current on ${farthestUse.toPair()}, freeUntil = $regsFreeUntil")
+                splitBefore(current, farthestUse.value)
                 true
+            }
+        }
+    }
+
+    private fun splitBefore(victim: LiveRange, instrIx: Int) {
+        val rest = victim.splitBefore(instrIx, spillReloadBuilder())
+        unhandled += rest
+    }
+
+    private fun allocateBlocked() {
+        val regNextUse: MutableMap<Reg, Pair<Int, LiveRange?>> = physicalRegs.map {
+            it.to(Int.MAX_VALUE.to(null))
+        }.toMap(mutableMapOf())
+
+        active.forEach {
+            regNextUse[it.allocated!!] = it.nextPositionAfter(currentPosition)!!.instrIx.to(it)
+        }
+
+        inactive.forEach {
+            if (it.intersects(current)) {
+                regNextUse[it.allocated!!] = it.nextPositionAfter(currentPosition)!!.instrIx.to(it)
+            }
+        }
+
+        fixed.forEach {
+            it.nextIntersection(current)?.let { sect ->
+                regNextUse[it.allocated!!] = sect.to(it)
+            }
+        }
+
+        val farthestUse = regNextUse.maxBy { it.value.first }!!
+        if (farthestUse.value.first <= currentPosition.instrIx) {
+            // Split self
+            assert(false) { "Split self($current): not implemented" }
+        } else {
+            // Split farthest
+            val victim = farthestUse.value.second!!
+            splitBefore(victim, currentPosition.instrIx)
+            current.allocated = victim.allocated
+            active += current
+        }
+    }
+
+    private fun spillReloadBuilder() = object: SpillReloadBuilder {
+        override fun addSpill(instrIx: Int, regPair: SpillReloadPair) {
+            allocatedSpillSlot.compute(regPair.virtual) { _, slot0 ->
+                val slot = slot0 ?: nextSpillSlot++
+                spills.compute(instrIx) { _, regsToSpill ->
+                    (regsToSpill ?: mutableSetOf()).apply {
+                        add(regPair)
+                    }
+                }
+                slot
+            }
+        }
+
+        override fun addReload(instrIx: Int, regPair: SpillReloadPair) {
+            reloads.compute(instrIx) { _, regsToReload ->
+                (regsToReload ?: mutableSetOf()).apply {
+                    add(regPair)
+                }
             }
         }
     }
@@ -364,10 +168,92 @@ class LinearScan(liveRanges: LiveRangeMap, val physicalRegs: List<Reg>) {
                     from.swapPop(ix)
                     to += it
                 }
-                // ^ The above two situations don't need an increment in ix.
+                // ^ The above two situations don't need an increment in instrIx.
                 else -> ix++
             }
         }
+    }
+}
+
+class AllocationRealizer(val lsra: LinearScan, val block: InstructionBlock) {
+    companion object {
+        val STACK_SLOT_SIZE = 8
+        val SP = Reg.RSP
+
+        fun slotToOperand(slotIx: Int): Mem {
+            return Mem(SP, STACK_SLOT_SIZE * slotIx)
+        }
+
+        fun mkEnter(slotUsage: Int): Instruction {
+            return Instruction.of(OpCode.SUB, Imm(STACK_SLOT_SIZE * slotUsage), SP)
+        }
+
+        fun mkLeave(slotUsage: Int): Instruction {
+            return Instruction.of(OpCode.ADD, Imm(STACK_SLOT_SIZE * slotUsage), SP)
+        }
+    }
+
+    private fun realizeSpillReload(isSpill: Boolean, instrIx: Int, out: MutableList<Instruction>) {
+        val from = if (isSpill) {
+            lsra.spills
+        } else {
+            lsra.reloads
+        }
+        from[instrIx]?.let {
+            it.forEach {
+                val slotIx = lsra.allocatedSpillSlot[it.virtual]!!
+                val stackSlot = slotToOperand(slotIx)
+                out += if (isSpill) {
+                    Instruction.of(OpCode.MOV, it.physical, stackSlot)
+                } else {
+                    Instruction.of(OpCode.MOV, stackSlot, findAllocatedRegAt(instrIx, it.virtual))
+                }
+            }
+        }
+    }
+
+    private fun findAllocatedRegAt(instrIx: Int, r: Reg): Reg {
+        return if (r.isVirtual) {
+            val rg = lsra.liveRanges[r]!!.findRangeWithPos(instrIx)!!
+            rg.allocated!!
+        } else {
+            r
+        }
+    }
+
+    private fun replaceRegInInstr(instrIx: Int, instr: Instruction): Instruction {
+        var out = instr
+        instr.operandIxs.forEach {
+            out = out.mapRegAt(it) { findAllocatedRegAt(instrIx, it) }
+        }
+        return out
+    }
+
+    fun realize(): InstructionBlock {
+        val out = mutableListOf<Instruction>()
+        block.body.forEachIndexed { i, instr ->
+            val instrIx = i * 2
+            if (i != 0) {
+                val posBefore = UsePosition.toGapBefore(instrIx)
+                // XXX: Spill or reload first?
+                realizeSpillReload(isSpill = true, instrIx = posBefore, out = out)
+                realizeSpillReload(isSpill = false, instrIx = posBefore, out = out)
+            }
+            out += replaceRegInInstr(instrIx, instr)
+        }
+        return block.copy(body = out)
+    }
+}
+
+private interface SpillReloadBuilder {
+    fun addSpill(instrIx: Int, regPair: SpillReloadPair)
+    fun addReload(instrIx: Int, regPair: SpillReloadPair)
+}
+
+data class SpillReloadPair(val virtual: Reg, val physical: Reg) {
+    init {
+        assert(virtual.isVirtual)
+        assert(physical.isPhysical)
     }
 }
 
@@ -381,5 +267,32 @@ private fun <A> MutableList<A>.swapPop(ix: Int): A {
     val res = this[ix]
     this[ix] = this[size - 1]
     pop()
+    return res
+}
+
+private fun LiveRange.splitBefore(instrIx: Int, sgen: SpillReloadBuilder): LiveRange {
+    assert(firstUsePosition.instrIx < instrIx) {
+        "${firstUsePosition.instrIx} < $instrIx failed"
+    }
+    assert(instrIx < lastUsePosition.instrIx)
+
+    val inGroup = groupContains(instrIx)
+    val splitOnListIx = nextListIxAfter(instrIx)
+    val mine = poses.subList(0, splitOnListIx).toMutableList()
+    val theirs = poses.subList(splitOnListIx, poses.size).toMutableList()
+    if (inGroup) {
+        val spillAt = UsePosition.toGapBefore(instrIx)
+        val reloadAt = UsePosition.toGapBefore(nextPositionAfter(instrIx)!!.instrIx)
+
+        mine.add(UsePosition(virtualReg, spillAt, UsePosition.Kind.Read, OperandIx(0, isInput = true)))
+        sgen.addSpill(spillAt, SpillReloadPair(virtualReg, physical = allocated!!))
+
+        theirs.add(0, UsePosition(virtualReg, reloadAt,
+                UsePosition.Kind.Write, OperandIx(0, isInput = false)))
+        sgen.addReload(reloadAt, SpillReloadPair(virtualReg, physical = allocated!!))
+    }
+    poses = mine
+    val res = LiveRange(theirs, parent = this)
+    children += res
     return res
 }

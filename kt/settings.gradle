@@ -1,4 +1,4 @@
-rootProject.name = 'ssa-graph-reducer'
+rootProject.name = 'ssa-grinder'
 
 include ':core'
 include ':cli'
