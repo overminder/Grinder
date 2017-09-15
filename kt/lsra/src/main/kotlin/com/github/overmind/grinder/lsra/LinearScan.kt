@@ -281,6 +281,8 @@ private fun LiveRange.splitBefore(instrIx: Int, sgen: SpillReloadBuilder): LiveR
     val mine = poses.subList(0, splitOnListIx).toMutableList()
     val theirs = poses.subList(splitOnListIx, poses.size).toMutableList()
     if (inGroup) {
+        // NOTE: Can't simply use (instrIx - 1) here, since instrIx can already be a gap position. In this
+        // case, it's safe to just spill in the same place as spills happen before reloads.
         val spillAt = UsePosition.toGapBefore(instrIx)
         val reloadAt = UsePosition.toGapBefore(nextPositionAfter(instrIx)!!.instrIx)
 

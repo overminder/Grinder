@@ -1,12 +1,104 @@
 package com.github.overmind.grinder.lsra
 
 import com.github.overmind.grinder.asm.*
+import java.util.*
 
-class BlockLiveness(val block: InstructionBlock, val liveOut: Set<Reg>) {
+class GraphLiveness(val entry: InstructionBlock) {
+    val poToLabel = mutableListOf<Label>()
+    val labelToBlock = mutableMapOf<Label, InstructionBlock>()
+    val labelToPo = mutableMapOf<Label, Int>()
+    val labelToRpo = mutableMapOf<Label, Int>()
+    val liveOuts = mutableMapOf<Label, MutableSet<Reg>>()
+    val labelToInstrOffset = mutableMapOf<Label, Int>()
+    val labelPreds = mutableMapOf<Label, MutableSet<Label>>()
+    private val data = LivenessData()
+
+    val liveRanges
+        get() = data.liveRanges
+
+    fun computePo() {
+        val visited = mutableSetOf<Label>()
+        fun dfs(b: InstructionBlock) {
+            if (visited.add(b.label)) {
+                b.successors.forEach {
+                    dfs(it)
+                    // Also fill the predMap
+                    labelPreds.compute(it.label) { _, ps ->
+                        (ps ?: mutableSetOf()).apply {
+                            add(b.label)
+                        }
+                    }
+                }
+                poToLabel += b.label
+                labelToBlock[b.label] = b
+            }
+        }
+
+        dfs(entry)
+        val numBlocks = poToLabel.size
+        var prevInstrIxOffset = 0
+        poToLabel.reversed().forEachIndexed { ix, lbl ->
+            labelToRpo[lbl] = ix
+            labelToPo[lbl] = numBlocks - ix - 1
+
+            // Also count the instr indices.
+            labelToInstrOffset[lbl] = prevInstrIxOffset
+            prevInstrIxOffset += UsePosition.positionCountFromInstrCount(labelToBlock[lbl]!!.body.size)
+        }
+    }
+
+    fun compute() {
+        // The underlying LinkedHashMap is FIFO
+        val workQ = mutableSetOf<Label>()
+        workQ.addAll(poToLabel)
+
+        while (workQ.isNotEmpty()) {
+            val lbl = workQ.first()
+            workQ.remove(lbl)
+
+            val b = labelToBlock[lbl]!!
+            val liveOut = liveOuts.compute(lbl) { _, rs -> rs ?: mutableSetOf() }!!
+            val bLive = BlockLiveness(b, liveOut, labelToInstrOffset[lbl]!!, data)
+            bLive.compute()
+            val liveIn = bLive.liveIn
+
+            labelPreds[lbl]?.let { preds ->
+                preds.forEach {
+                    if (liveIn != liveOuts[it]) {
+                        // liveIn changed for this block: enqueue
+                        liveOuts[it] = liveIn
+                        workQ += it
+                    }
+                }
+            }
+        }
+
+        data.linkLiveRanges()
+    }
+}
+
+internal class LivenessData {
+    val usePos = mutableMapOf<Reg, MutableList<UsePosition>>()
+    val liveRanges = mutableMapOf<Reg, LiveRange>()
+
+    fun linkLiveRanges() {
+        usePos.forEach { r, poses ->
+            val sorted = poses.sortedWith(UsePosition.ORDER_BY_IX_AND_KIND)
+            val rg = LiveRange(sorted.toMutableList())
+            if (r.isPhysical) {
+                rg.allocated = r
+            }
+            liveRanges[r] = rg
+        }
+    }
+}
+
+internal class BlockLiveness(val block: InstructionBlock,
+                             liveOut: Set<Reg>,
+                             val instrIxOffset: Int,
+                             val data: LivenessData) {
     private val liveNow = liveOut.toMutableSet()
     val liveIn = mutableSetOf<Reg>()
-    private val usePos = mutableMapOf<Reg, MutableList<UsePosition>>()
-    val liveRanges = mutableMapOf<Reg, LiveRange>()
 
     fun addOprDef(opr: Operand, pos: Int, oprIx: OperandIx) {
         when (opr) {
@@ -22,7 +114,7 @@ class BlockLiveness(val block: InstructionBlock, val liveOut: Set<Reg>) {
     }
 
     fun addUsePos(upos: UsePosition) {
-        usePos.compute(upos.reg) { _, v0 ->
+        data.usePos.compute(upos.reg) { _, v0 ->
             val v = v0 ?: mutableListOf()
             v += upos
             v
@@ -57,7 +149,7 @@ class BlockLiveness(val block: InstructionBlock, val liveOut: Set<Reg>) {
 
     fun compute() {
         block.body.withIndex().reversed().forEach { (rawIx, instr) ->
-            val pos = rawIx * 2
+            val pos = instrIxOffset + UsePosition.positionCountFromInstrCount(rawIx)
             instr.outputs.forEachIndexed { outputIx, it ->
                 addOprDef(it, pos, OperandIx(outputIx, isInput = false))
             }
@@ -72,23 +164,30 @@ class BlockLiveness(val block: InstructionBlock, val liveOut: Set<Reg>) {
             }
         }
         liveIn.addAll(liveNow)
-        linkLiveRange()
+        data.linkLiveRanges()
+    }
 
+    fun verify() {
+        data.liveRanges.forEach { _, u -> u.verify() }
+    }
+}
+
+class SingleBlockGraphLiveness(block: InstructionBlock, val liveOut: Set<Reg>) {
+    private val inner = BlockLiveness(block, liveOut, 0, LivenessData())
+
+    val liveRanges
+        get() = inner.data.liveRanges
+
+    val liveIn
+        get() = inner.liveIn
+
+    fun compute() {
+        inner.compute()
         fixLiveInOut()
-        verify()
+        inner.verify()
     }
 
-    private fun linkLiveRange() {
-        usePos.forEach { r, poses ->
-            val sorted = poses.sortedWith(UsePosition.ORDER_BY_IX_AND_KIND)
-            val rg = LiveRange(sorted.toMutableList())
-            if (r.isPhysical) {
-                rg.allocated = r
-            }
-            liveRanges[r] = rg
-        }
-    }
-
+    // TODO: make this more general
     fun fixLiveInOut() {
         liveIn.forEach {
             // assert(it.isPhysical)
@@ -104,10 +203,6 @@ class BlockLiveness(val block: InstructionBlock, val liveOut: Set<Reg>) {
                 rg.poses.add(posAfter)
             }
         }
-    }
-
-    fun verify() {
-        liveRanges.forEach { _, u -> u.verify() }
     }
 }
 
@@ -162,6 +257,8 @@ data class UsePosition(val reg: Reg, val instrIx: Int, val kind: Kind, val opera
                 instrIx - 1
             }
         }
+
+        fun positionCountFromInstrCount(instrCount: Int) = instrCount * 2
     }
 }
 

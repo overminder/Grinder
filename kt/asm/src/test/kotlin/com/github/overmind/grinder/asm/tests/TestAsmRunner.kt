@@ -5,6 +5,8 @@ import org.junit.Assert
 import org.junit.Test
 
 class TestAsmRunner {
+    val ENTRY = NamedLabel(AsmRunner.ENTRY_NAME)
+
     fun expectResult(source: String, arg: Long, expected: Long) {
         AsmTestUtils.run(source) {
             println("Dylib saved to: $dylibPath")
@@ -36,7 +38,7 @@ class TestAsmRunner {
 
     @Test
     fun testInstructionBlock() {
-        val block = InstructionBlock(AsmRunner.ENTRY_NAME, true, listOf(
+        val block = InstructionBlock(ENTRY, true, listOf(
                 Instruction.of(OpCode.LEA, Mem(Reg.RDI, index = Reg.RDI, disp = 2), Reg.RAX),
                 Instruction.of(OpCode.RET)
         ))
@@ -45,10 +47,11 @@ class TestAsmRunner {
 
     @Test
     fun testJmp() {
-        val start = InstructionBlock(AsmRunner.ENTRY_NAME, true, listOf(
-                Instruction.of(OpCode.JMP, Label("end"))
+        val lblEnd = NamedLabel("end")
+        val start = InstructionBlock(ENTRY, true, listOf(
+                Instruction.of(OpCode.JMP, lblEnd)
         ))
-        val end = InstructionBlock("end", body = listOf(
+        val end = InstructionBlock(lblEnd, body = listOf(
                 Instruction.of(OpCode.LEA, Mem(Reg.RDI, index = Reg.RDI, disp = 2), Reg.RAX),
                 Instruction.of(OpCode.RET)
         ))
@@ -57,14 +60,14 @@ class TestAsmRunner {
 
     @Test
     fun testJg() {
-        val lblT = Label("t")
-        val start = InstructionBlock(AsmRunner.ENTRY_NAME, true, listOf(
+        val lblT = NamedLabel("t")
+        val start = InstructionBlock(ENTRY, true, listOf(
                 Instruction.of(OpCode.CMP, Imm(0), Reg.RDI),
                 Instruction.of(OpCode.JG, lblT),
                 Instruction.of(OpCode.MOV, Imm(0), Reg.RAX),
                 Instruction.of(OpCode.RET)
         ))
-        val t = InstructionBlock(lblT.name, body = listOf(
+        val t = InstructionBlock(lblT, body = listOf(
                 Instruction.of(OpCode.MOV, Imm(1), Reg.RAX),
                 Instruction.of(OpCode.RET)
         ))
@@ -73,7 +76,7 @@ class TestAsmRunner {
 
     @Test
     fun testNeg() {
-        val block = InstructionBlock(AsmRunner.ENTRY_NAME, true, listOf(
+        val block = InstructionBlock(ENTRY, true, listOf(
                 Instruction.of(OpCode.NEG, Reg.RDI),
                 Instruction.of(OpCode.MOV, Reg.RDI, Reg.RAX),
                 Instruction.of(OpCode.RET)
@@ -83,18 +86,18 @@ class TestAsmRunner {
 
     @Test
     fun testFibo() {
-        val lblFibo = Label("fibo")
-        val lblRecur = Label("fiboRecur")
-        val start = InstructionBlock(AsmRunner.ENTRY_NAME, true, listOf(
+        val lblFibo = NamedLabel("fibo")
+        val lblRecur = NamedLabel("fiboRecur")
+        val start = InstructionBlock(ENTRY, true, listOf(
                 Instruction.of(OpCode.JMP, lblFibo)
         ))
-        val fiboStart = InstructionBlock(lblFibo.name, body = listOf(
+        val fiboStart = InstructionBlock(lblFibo, body = listOf(
                 Instruction.of(OpCode.CMP, Imm(2), Reg.RDI),
                 Instruction.of(OpCode.JGE, lblRecur),
                 Instruction.of(OpCode.MOV, Reg.RDI, Reg.RAX),
                 Instruction.of(OpCode.RET)
         ))
-        val fiboRecur = InstructionBlock(lblRecur.name, body = listOf(
+        val fiboRecur = InstructionBlock(lblRecur, body = listOf(
                 Instruction.of(OpCode.PUSH, Reg.RDI),
                 Instruction.of(OpCode.SUB, Imm(1), Reg.RDI),
                 Instruction.of(OpCode.CALL, lblFibo),

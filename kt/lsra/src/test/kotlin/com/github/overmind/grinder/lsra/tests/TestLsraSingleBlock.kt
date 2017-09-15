@@ -3,7 +3,7 @@ package com.github.overmind.grinder.lsra.tests
 import com.github.overmind.grinder.asm.*
 import com.github.overmind.grinder.asm.tests.AsmTestUtils
 import com.github.overmind.grinder.lsra.AllocationRealizer
-import com.github.overmind.grinder.lsra.BlockLiveness
+import com.github.overmind.grinder.lsra.SingleBlockGraphLiveness
 import com.github.overmind.grinder.lsra.LinearScan
 import org.junit.Assert
 import org.junit.Test
@@ -24,12 +24,16 @@ private fun makeGlobalAndAdjustStack(lsra: LinearScan, b: InstructionBlock): Ins
             b.body.asSequence().take(b.body.size - 1) +
             sequenceOf(AllocationRealizer.mkLeave(slotUsage)) +
             sequenceOf(b.body.last())).toList()
-    return b.copy(AsmRunner.ENTRY_NAME, global = true, body = newBody)
+    return b.copy(NamedLabel(AsmRunner.ENTRY_NAME), global = true, body = newBody)
 }
 
 class BlockBuilder(private val instrs: MutableList<Instruction>) {
     private fun emit(op: OpCode) {
         instrs.add(Instruction.of(op))
+    }
+
+    private fun emit(op: OpCode, opr: Operand) {
+        instrs.add(Instruction.of(op, opr))
     }
 
     private fun emit(op: OpCode, src: Operand, dst: Operand) {
@@ -51,19 +55,28 @@ class BlockBuilder(private val instrs: MutableList<Instruction>) {
     fun ret() {
         emit(OpCode.RET)
     }
-}
 
-class TestLsra {
-    fun buildBlock(run: BlockBuilder.() -> Unit): InstructionBlock {
-        val instrs = mutableListOf<Instruction>()
-        val builder = BlockBuilder(instrs)
-        run(builder)
-        val b = InstructionBlock.local(*instrs.toTypedArray())
-        return b
+    fun jmp(label: Label) {
+        emit(OpCode.JMP, label)
     }
 
-    fun livenessWithRet(b: InstructionBlock): BlockLiveness {
-        val live = BlockLiveness(b, setOf(Reg.RAX))
+    fun je(label: Label) {
+        emit(OpCode.JE, label)
+    }
+}
+
+fun buildBlock(run: BlockBuilder.() -> Unit): InstructionBlock {
+    val instrs = mutableListOf<Instruction>()
+    val builder = BlockBuilder(instrs)
+    run(builder)
+    val b = InstructionBlock.local(*instrs.toTypedArray())
+    return b
+}
+
+class TestLsraSingleBlock {
+
+    fun livenessWithRet(b: InstructionBlock): SingleBlockGraphLiveness {
+        val live = SingleBlockGraphLiveness(b, setOf(Reg.RAX))
         live.compute()
         return live
     }

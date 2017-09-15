@@ -21,28 +21,32 @@ object RelaxedAtntSyntaxDef: AtntSyntaxDef {
 
 data class InstructionBlocks(val bs: List<InstructionBlock>): AtntSyntax {
     override fun renderAtntWithDef(def: AtntSyntaxDef): String {
-        return bs.map { it.renderAtntWithDef(def) }.joinToString("\n")
+        return bs.joinToString("\n") { it.renderAtntWithDef(def) }
     }
 }
 
-data class InstructionBlock(val name: String, val global: Boolean = false, val body: List<Instruction>): AtntSyntax {
+data class InstructionBlock(val label: Label,
+                            val global: Boolean = false,
+                            val body: List<Instruction>,
+                            var successors: List<InstructionBlock> = emptyList()): AtntSyntax {
+    override fun toString() = renderAtntWithDef(RelaxedAtntSyntaxDef)
+
     override fun renderAtntWithDef(def: AtntSyntaxDef) = buildString {
         val linkageName = if (global) {
-            val name1 = AsmRunner.nameForLinkage(name)
+            val name1 = AsmRunner.nameForLinkage(label.renderAtntWithDef(def))
             append("\t.globl $name1\n")
             name1
         } else {
-            name
+            label.renderAtntWithDef(def)
         }
         append("$linkageName:\n")
+        append("# -> ${successors.map { it.label }.joinToString(", ")}\n")
         append(body.asSequence().map { it.renderAtntWithDef(def) }.joinToString("\n"))
     }
 
     companion object {
-        private var nextId = 1
-
         fun local(vararg body: Instruction): InstructionBlock {
-            return InstructionBlock(".L${nextId++}", body = body.toList())
+            return InstructionBlock(LocalLabel.mkUnique(), body = body.toList())
         }
     }
 }
@@ -196,6 +200,8 @@ data class OpCode(val name: String,
         val JLE = J.copy(jmpCondition = JmpCondition.Le)
         val JG = J.copy(jmpCondition = JmpCondition.G)
         val JGE = J.copy(jmpCondition = JmpCondition.Ge)
+        val JE = J.copy(jmpCondition = JmpCondition.E)
+        val JNE = J.copy(jmpCondition = JmpCondition.Ne)
 
         val CALL = OpCode("call", 1, isCall = true)
 
@@ -237,9 +243,25 @@ data class Imm(val value: Int): Operand() {
     override fun renderAtntWithDef(def: AtntSyntaxDef) = "$" + value
 }
 
-data class Label(val name: String, val deref: Boolean = false): Operand() {
-    // XXX: Two kinds of addressing mode
+sealed class Label: Operand()
+
+data class NamedLabel(val name: String, val deref: Boolean = false): Label() {
+    // Note that labels have two kinds of addressing modes.
     override fun renderAtntWithDef(def: AtntSyntaxDef) = if (deref) "$" + name else name
+    override fun toString() = renderAtntWithDef(RelaxedAtntSyntaxDef)
+}
+
+data class LocalLabel(val id: Int, val deref: Boolean = false): Label() {
+    override fun toString() = renderAtntWithDef(RelaxedAtntSyntaxDef)
+    override fun renderAtntWithDef(def: AtntSyntaxDef): String {
+        val name = ".L$id"
+        return if (deref) "$" + name else name
+    }
+
+    companion object {
+        private var nextId = 0
+        fun mkUnique() = LocalLabel(nextId++)
+    }
 }
 
 data class Reg private constructor(val id: Int): Operand() {
