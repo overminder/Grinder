@@ -52,6 +52,10 @@ class BlockBuilder(private val instrs: MutableList<Instruction>) {
         emit(OpCode.ADD, src, dst)
     }
 
+    fun cmp(src: Operand, dst: Operand) {
+        emit(OpCode.CMP, src, dst)
+    }
+
     fun ret() {
         emit(OpCode.RET)
     }
@@ -62,6 +66,10 @@ class BlockBuilder(private val instrs: MutableList<Instruction>) {
 
     fun je(label: Label) {
         emit(OpCode.JE, label)
+    }
+
+    fun jl(label: Label) {
+        emit(OpCode.JL, label)
     }
 }
 
@@ -74,7 +82,6 @@ fun buildBlock(run: BlockBuilder.() -> Unit): InstructionBlock {
 }
 
 class TestLsraSingleBlock {
-
     fun livenessWithRet(b: InstructionBlock): SingleBlockGraphLiveness {
         val live = SingleBlockGraphLiveness(b, setOf(Reg.RAX))
         live.compute()

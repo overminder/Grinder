@@ -8,6 +8,7 @@ class GraphLiveness(val entry: InstructionBlock) {
     val labelToBlock = mutableMapOf<Label, InstructionBlock>()
     val labelToPo = mutableMapOf<Label, Int>()
     val labelToRpo = mutableMapOf<Label, Int>()
+    val liveIns = mutableMapOf<Label, Set<Reg>>()
     val liveOuts = mutableMapOf<Label, MutableSet<Reg>>()
     val labelToInstrOffset = mutableMapOf<Label, Int>()
     val labelPreds = mutableMapOf<Label, MutableSet<Label>>()
@@ -61,6 +62,9 @@ class GraphLiveness(val entry: InstructionBlock) {
             val bLive = BlockLiveness(b, liveOut, labelToInstrOffset[lbl]!!, data)
             bLive.compute()
             val liveIn = bLive.liveIn
+            liveIns[b.label] = liveIn
+
+            // println("g.compute(${lbl})")
 
             labelPreds[lbl]?.let { preds ->
                 preds.forEach {
@@ -74,6 +78,11 @@ class GraphLiveness(val entry: InstructionBlock) {
         }
 
         data.linkLiveRanges()
+    }
+
+    fun fixLiveInOut(exit: InstructionBlock) {
+        fixLiveInOut0(liveRanges, liveBefore = liveIns[entry.label])
+        fixLiveInOut0(liveRanges, liveAfter = liveOuts[exit.label])
     }
 }
 
@@ -104,6 +113,7 @@ internal class BlockLiveness(val block: InstructionBlock,
         when (opr) {
             is Reg -> addRegDef(opr, pos, oprIx)
             is Mem -> opr.regs().forEach { addRegUse(it, pos, oprIx) }
+            else -> {}
         }
     }
 
@@ -125,6 +135,7 @@ internal class BlockLiveness(val block: InstructionBlock,
         when (opr) {
             is Reg -> addRegUse(opr, pos, oprIx)
             is Mem -> opr.regs().forEach { addRegUse(it, pos, oprIx) }
+            else -> {}
         }
     }
 
@@ -138,13 +149,21 @@ internal class BlockLiveness(val block: InstructionBlock,
         when (opr) {
             is Reg -> addInplaceRegUse(opr, pos, oprIx)
             is Mem -> opr.regs().forEach { addRegUse(it, pos, oprIx) }
+            else -> {}
         }
     }
 
     fun addInplaceRegUse(r: Reg, pos: Int, oprIx: OperandIx) {
         // An inplace use doesn't change the liveness.
-        assert(r in liveNow)
-        addUsePos(UsePosition(r, pos, UsePosition.Kind.ReadWrite, oprIx))
+        // assert(r in liveNow)
+
+        // Note that in cyclic graphs, the predecessors of the current block might have not yet been visited.
+        // In this case, liveIn will be empty and we guard against this situation.
+        // It's safe to do so as once we start to visit the predecessors, their liveOuts will change and therefore
+        // this block will be computed again.
+        if (r in liveNow) {
+            addUsePos(UsePosition(r, pos, UsePosition.Kind.ReadWrite, oprIx))
+        }
     }
 
     fun compute() {
@@ -172,6 +191,33 @@ internal class BlockLiveness(val block: InstructionBlock,
     }
 }
 
+// Normalize the UsePositions for the given live-before and live-after registers so that they
+// form valid LiveRanges (rather than a single degenerated UsePosition).
+// XXX: This is correct for graphs with a single exit. What about multi-exit graphs? We might still need to
+// special-case that...
+private fun fixLiveInOut0(liveRanges: LiveRangeMap, liveBefore: Set<Reg>? = null, liveAfter: Set<Reg>? = null) {
+    liveBefore?.let {
+        it.forEach {
+            // assert(it.isPhysical)
+            liveRanges[it]!!.let { rg ->
+                val posBefore = UsePosition(it, Int.MIN_VALUE, UsePosition.Kind.Write, OperandIx.DUMMY)
+                rg.poses.add(0, posBefore)
+            }
+        }
+    }
+    liveAfter?.let {
+        it.forEach {
+            // assert(it.isPhysical)
+            liveRanges[it]!!.let { rg ->
+                val posAfter = UsePosition(it, Int.MAX_VALUE, UsePosition.Kind.Read, OperandIx.DUMMY)
+                rg.poses.add(posAfter)
+            }
+        }
+    }
+}
+
+
+// This adds artificial live ranges for pre-block liveIns and post-block liveOuts.
 class SingleBlockGraphLiveness(block: InstructionBlock, val liveOut: Set<Reg>) {
     private val inner = BlockLiveness(block, liveOut, 0, LivenessData())
 
@@ -183,26 +229,8 @@ class SingleBlockGraphLiveness(block: InstructionBlock, val liveOut: Set<Reg>) {
 
     fun compute() {
         inner.compute()
-        fixLiveInOut()
+        fixLiveInOut0(liveRanges, liveIn, liveOut)
         inner.verify()
-    }
-
-    // TODO: make this more general
-    fun fixLiveInOut() {
-        liveIn.forEach {
-            // assert(it.isPhysical)
-            liveRanges[it]!!.let { rg ->
-                val posBefore = UsePosition(it, Int.MIN_VALUE, UsePosition.Kind.Write, OperandIx.DUMMY)
-                rg.poses.add(0, posBefore)
-            }
-        }
-        liveOut.forEach {
-            // assert(it.isPhysical)
-            liveRanges[it]!!.let { rg ->
-                val posAfter = UsePosition(it, Int.MAX_VALUE, UsePosition.Kind.Read, OperandIx.DUMMY)
-                rg.poses.add(posAfter)
-            }
-        }
     }
 }
 

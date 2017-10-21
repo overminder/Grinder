@@ -62,7 +62,7 @@ data class Instruction private constructor(val op: OpCode,
             inputs
         }
 
-    private fun allOperands() = (inputs ?: emptyList()) + (outputs ?: emptyList())
+    private fun allOperands() = inputs + outputs
 
     override fun renderAtntWithDef(def: AtntSyntaxDef) = buildString {
         append("\t")
@@ -89,6 +89,9 @@ data class Instruction private constructor(val op: OpCode,
         }
 
         fun of(op: OpCode, src: Operand, dst: Operand): Instruction {
+            if (op.sameAsLastInput) {
+                assert(dst !is Imm)
+            }
             val (inputs, outputs) = op.prepareArgs(src, dst)
             return Instruction(op, inputs, outputs)
         }
