@@ -3,61 +3,76 @@ package com.github.overmind.grinder.lsra
 import com.github.overmind.grinder.asm.*
 import java.util.*
 
-class GraphLiveness(val entry: InstructionBlock) {
-    val poToLabel = mutableListOf<Label>()
-    val labelToBlock = mutableMapOf<Label, InstructionBlock>()
-    val labelToPo = mutableMapOf<Label, Int>()
-    val labelToRpo = mutableMapOf<Label, Int>()
+interface NumberedInstructions {
+    fun iterator(): Sequence<Pair<Int, Instruction>>
+    fun replace(body: List<Instruction>)
+}
+
+data class NumberedInstructionBlock(val block: InstructionBlock): NumberedInstructions {
+    var newBody: List<Instruction> = block.body
+    override fun iterator(): Sequence<Pair<Int, Instruction>> {
+        return newBody.asSequence().mapIndexed { ix, instr ->
+            (ix * 2).to(instr)
+        }
+    }
+
+    override fun replace(body: List<Instruction>) {
+        newBody = body
+    }
+
+    fun take(): InstructionBlock {
+        return block.copy(body = newBody)
+    }
+}
+
+fun InstructionBlock.asNumbered() = NumberedInstructionBlock(this)
+
+class GraphLiveness(val g: InstrGraph) {
     val liveIns = mutableMapOf<Label, Set<Reg>>()
     val liveOuts = mutableMapOf<Label, MutableSet<Reg>>()
     val labelToInstrOffset = mutableMapOf<Label, Int>()
-    val labelPreds = mutableMapOf<Label, MutableSet<Label>>()
     private val data = LivenessData()
 
     val liveRanges
         get() = data.liveRanges
 
-    fun computePo() {
-        val visited = mutableSetOf<Label>()
-        fun dfs(b: InstructionBlock) {
-            if (visited.add(b.label)) {
-                b.successors.forEach {
-                    dfs(it)
-                    // Also fill the predMap
-                    labelPreds.compute(it.label) { _, ps ->
-                        (ps ?: mutableSetOf()).apply {
-                            add(b.label)
-                        }
+    fun asNumbered(): List<NumberedInstructions> {
+        // XXX: inplace-modification of linked hash map while iterating: is this ok?
+        return g.labelToBlock.map {
+            object: NumberedInstructions {
+                override fun iterator(): Sequence<Pair<Int, Instruction>> {
+                    return g.labelToBlock[it.key]!!.body.asSequence().mapIndexed { ix, instr ->
+                        (ix * 2 + labelToInstrOffset[it.key]!!).to(instr)
                     }
                 }
-                poToLabel += b.label
-                labelToBlock[b.label] = b
+
+                override fun replace(body: List<Instruction>) {
+                    g.labelToBlock[it.key] = g.labelToBlock[it.key]!!.copy(body = body)
+                }
             }
         }
+    }
 
-        dfs(entry)
-        val numBlocks = poToLabel.size
+    fun computeInstrOffest() {
         var prevInstrIxOffset = 0
-        poToLabel.reversed().forEachIndexed { ix, lbl ->
-            labelToRpo[lbl] = ix
-            labelToPo[lbl] = numBlocks - ix - 1
-
+        g.poToLabel.reversed().forEachIndexed { ix, lbl ->
             // Also count the instr indices.
             labelToInstrOffset[lbl] = prevInstrIxOffset
-            prevInstrIxOffset += UsePosition.positionCountFromInstrCount(labelToBlock[lbl]!!.body.size)
+            prevInstrIxOffset += UsePosition.positionCountFromInstrCount(g.labelToBlock[lbl]!!.body.size)
         }
     }
 
     fun compute() {
+        computeInstrOffest()
         // The underlying LinkedHashMap is FIFO
         val workQ = mutableSetOf<Label>()
-        workQ.addAll(poToLabel)
+        workQ.addAll(g.poToLabel)
 
         while (workQ.isNotEmpty()) {
             val lbl = workQ.first()
             workQ.remove(lbl)
 
-            val b = labelToBlock[lbl]!!
+            val b = g.labelToBlock[lbl]!!
             val liveOut = liveOuts.compute(lbl) { _, rs -> rs ?: mutableSetOf() }!!
             val bLive = BlockLiveness(b, liveOut, labelToInstrOffset[lbl]!!, data)
             bLive.compute()
@@ -66,7 +81,7 @@ class GraphLiveness(val entry: InstructionBlock) {
 
             // println("g.compute(${lbl})")
 
-            labelPreds[lbl]?.let { preds ->
+            g.labelPreds[lbl]?.let { preds ->
                 preds.forEach {
                     if (liveIn != liveOuts[it]) {
                         // liveIn changed for this block: enqueue
@@ -80,9 +95,9 @@ class GraphLiveness(val entry: InstructionBlock) {
         data.linkLiveRanges()
     }
 
-    fun fixLiveInOut(exit: InstructionBlock) {
-        fixLiveInOut0(liveRanges, liveBefore = liveIns[entry.label])
-        fixLiveInOut0(liveRanges, liveAfter = liveOuts[exit.label])
+    fun fixLiveInOut() {
+        fixLiveInOut0(liveRanges, liveBefore = liveIns[g.entry!!])
+        fixLiveInOut0(liveRanges, liveAfter = liveOuts[g.exit!!])
     }
 }
 

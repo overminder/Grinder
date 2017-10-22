@@ -19,38 +19,6 @@ object RelaxedAtntSyntaxDef: AtntSyntaxDef {
     override val allowVirtualReg: Boolean = true
 }
 
-data class InstructionBlocks(val bs: List<InstructionBlock>): AtntSyntax {
-    override fun renderAtntWithDef(def: AtntSyntaxDef): String {
-        return bs.joinToString("\n") { it.renderAtntWithDef(def) }
-    }
-}
-
-data class InstructionBlock(val label: Label,
-                            val global: Boolean = false,
-                            val body: List<Instruction>,
-                            var successors: List<InstructionBlock> = emptyList()): AtntSyntax {
-    override fun toString() = renderAtntWithDef(RelaxedAtntSyntaxDef)
-
-    override fun renderAtntWithDef(def: AtntSyntaxDef) = buildString {
-        val linkageName = if (global) {
-            val name1 = AsmRunner.nameForLinkage(label.renderAtntWithDef(def))
-            append("\t.globl $name1\n")
-            name1
-        } else {
-            label.renderAtntWithDef(def)
-        }
-        append("$linkageName:\n")
-        append("# -> ${successors.map { it.label }.joinToString(", ")}\n")
-        append(body.asSequence().map { it.renderAtntWithDef(def) }.joinToString("\n"))
-    }
-
-    companion object {
-        fun local(vararg body: Instruction): InstructionBlock {
-            return InstructionBlock(LocalLabel.mkUnique(), body = body.toList())
-        }
-    }
-}
-
 data class Instruction private constructor(val op: OpCode,
                                            val inputs: List<Operand> = emptyList(),
                                            val outputs: List<Operand> = emptyList()): AtntSyntax {

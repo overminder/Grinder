@@ -1,6 +1,6 @@
 package com.github.overmind.grinder.lsra.tests
 
-import com.github.overmind.grinder.asm.InstructionBlock
+import com.github.overmind.grinder.asm.InstrGraph
 import com.github.overmind.grinder.asm.Reg
 import com.github.overmind.grinder.lsra.AllocationRealizer
 import com.github.overmind.grinder.lsra.GraphLiveness
@@ -10,35 +10,33 @@ import org.junit.Test
 class TestLsraGraph {
     val tgl = TestGraphLiveness()
 
-    fun doGraph(entry: InstructionBlock, exit: InstructionBlock) {
-        val live = GraphLiveness(entry)
-        live.computePo()
-        tgl.addRaxToLiveOut(live, exit)
+    fun doGraph(g: InstrGraph) {
+        val live = GraphLiveness(g)
+        tgl.addRaxToLiveOut(live, g.exitBlock)
         live.compute()
-        live.fixLiveInOut(exit)
+        live.fixLiveInOut()
 
         val lsra = LinearScan(live.liveRanges,listOf(Reg.RDI, Reg.RSI, Reg.RAX))
         lsra.allocate()
         println(live.liveRanges)
 
-        // val realizer = AllocationRealizer(lsra, b)
+        AllocationRealizer(lsra, live.asNumbered()).realize()
+        println(g.labelToBlock)
     }
 
     @Test
     fun straight() {
-        val (entry, exit) = tgl.buildStraightGraph()
-        doGraph(entry, exit)
+        val g = tgl.buildStraightGraph()
+        doGraph(g)
     }
 
     @Test
     fun diamond() {
-        val g = tgl.buildDiamondGraph()
-        doGraph(g.entry, g.exit)
+        doGraph(tgl.buildDiamondGraph().toCFG())
     }
 
     @Test
     fun loop() {
-        val g = tgl.buildLoopGraph()
-        doGraph(g.entry, g.exit)
+        doGraph(tgl.buildLoopGraph().toCFG())
     }
 }

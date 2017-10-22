@@ -175,7 +175,7 @@ class LinearScan(val liveRanges: LiveRangeMap, val physicalRegs: List<Reg>) {
     }
 }
 
-class AllocationRealizer(val lsra: LinearScan, val block: InstructionBlock) {
+class AllocationRealizer(val lsra: LinearScan, val instrss: List<NumberedInstructions>) {
     companion object {
         val STACK_SLOT_SIZE = 8
         val SP = Reg.RSP
@@ -229,19 +229,21 @@ class AllocationRealizer(val lsra: LinearScan, val block: InstructionBlock) {
         return out
     }
 
-    fun realize(): InstructionBlock {
-        val out = mutableListOf<Instruction>()
-        block.body.forEachIndexed { i, instr ->
-            val instrIx = i * 2
-            if (i != 0) {
-                val posBefore = UsePosition.toGapBefore(instrIx)
-                // XXX: Spill or reload first?
-                realizeSpillReload(isSpill = true, instrIx = posBefore, out = out)
-                realizeSpillReload(isSpill = false, instrIx = posBefore, out = out)
+    fun realize() {
+        instrss.forEach {
+            val out = mutableListOf<Instruction>()
+            it.iterator().forEach { (instrIx, instr) ->
+                // | Originally we are checking if this is the first instr.
+                if (instrIx != 0) {
+                    val posBefore = UsePosition.toGapBefore(instrIx)
+                    // XXX: Spill or reload first?
+                    realizeSpillReload(isSpill = true, instrIx = posBefore, out = out)
+                    realizeSpillReload(isSpill = false, instrIx = posBefore, out = out)
+                }
+                out += replaceRegInInstr(instrIx, instr)
             }
-            out += replaceRegInInstr(instrIx, instr)
+            it.replace(out)
         }
-        return block.copy(body = out)
     }
 }
 

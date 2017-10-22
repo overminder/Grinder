@@ -5,6 +5,7 @@ import com.github.overmind.grinder.asm.tests.AsmTestUtils
 import com.github.overmind.grinder.lsra.AllocationRealizer
 import com.github.overmind.grinder.lsra.SingleBlockGraphLiveness
 import com.github.overmind.grinder.lsra.LinearScan
+import com.github.overmind.grinder.lsra.asNumbered
 import org.junit.Assert
 import org.junit.Test
 
@@ -123,8 +124,9 @@ class TestLsraSingleBlock {
         lsra.allocate()
         // println(lsra.handled)
         Assert.assertNotNull(live.liveRanges[v0]!!.allocated)
-        val realizer = AllocationRealizer(lsra, b)
-        val finalB = realizer.realize()
+        val numB = b.asNumbered()
+        AllocationRealizer(lsra, listOf(numB)).realize()
+        val finalB = numB.take()
         val finalB2 = makeGlobalAndAdjustStack(lsra, finalB)
         AsmTestUtils.run(finalB2.renderAtnt()) {
             Assert.assertEquals(call(10), 40)
@@ -153,8 +155,9 @@ class TestLsraSingleBlock {
         Assert.assertNotNull(live.liveRanges[v1]!!.allocated)
         Assert.assertNotNull(live.liveRanges[v2]!!.allocated)
 
-        val realizer = AllocationRealizer(lsra, b)
-        val finalB = realizer.realize()
+        val numB = b.asNumbered()
+        AllocationRealizer(lsra, listOf(numB)).realize()
+        val finalB = numB.take()
         val finalB2 = makeGlobalAndAdjustStack(lsra, finalB)
         AsmTestUtils.run(finalB2.renderAtnt()) {
             Assert.assertEquals(call(14), 42)
